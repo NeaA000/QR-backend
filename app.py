@@ -116,7 +116,7 @@ def upload():
 
 # ==== QR 생성 함수 ====
 def create_qr_with_logo(url, output_path, logo_path='static/logo.png', size_ratio=0.25):
-    # ✅ static 폴더 생성 (없으면)
+    # static 디렉토리가 없으면 자동 생성
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
@@ -130,7 +130,6 @@ def create_qr_with_logo(url, output_path, logo_path='static/logo.png', size_rati
         pos = ((qr_img.size[0] - size) // 2, (qr_img.size[1] - size) // 2)
         qr_img.paste(logo, pos, mask=logo if logo.mode == 'RGBA' else None)
     qr_img.save(output_path)
-
 
 # ==== 업로드 로그 기록 ====
 def write_log(group_id, name, folder, files, qr_file, qr_url, date):

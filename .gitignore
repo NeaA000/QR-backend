@@ -11,10 +11,6 @@ __pycache__/
 # 🐍 Jupyter 노트북 체크포인트 (혹시 쓸 경우)
 .ipynb_checkpoints/
 
-# 🖼 QR 코드/임시 파일 (선택적으로 무시 가능)
-*.png
-temp_*
-
 # 📦 가상환경 폴더 (예: venv, env)
 venv/
 env/
