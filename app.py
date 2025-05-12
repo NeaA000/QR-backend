@@ -75,9 +75,9 @@ def upload():
 
         group_id = uuid.uuid4().hex
         date_str = datetime.now().strftime('%Y%m%d')
-        safe_name = re.sub(r'[^\w가-힣]', '_', group_name)
+        safe_name = re.sub(r'[^\w\uac00-\ud7a3]', '_', group_name)
         qr_filename = f"{safe_name}_{date_str}.png"
-        qr_path = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
+        tmp_qr_path = f"/tmp/{qr_filename}"
         qr_url = f"{APP_BASE_URL}{group_id}"
         s3_folder = f"groups/{group_name}_{date_str}"
 
@@ -85,7 +85,7 @@ def upload():
         for idx, file in enumerate(files):
             ext = file.filename.split('.')[-1]
             filename = f"video{idx + 1}.{ext}"
-            tmp_path = Path(f"./temp_{filename}")
+            tmp_path = Path(f"/tmp/temp_{filename}")
             file.save(tmp_path)
 
             s3_key = f"{s3_folder}/{filename}"
@@ -97,10 +97,11 @@ def upload():
             tmp_path.unlink(missing_ok=True)
             uploaded_files.append(filename)
 
-        create_qr_with_logo(qr_url, qr_path)
+        create_qr_with_logo(qr_url, tmp_qr_path)
 
-        s3.upload_file(qr_path, BUCKET_NAME, f"{s3_folder}/{qr_filename}",
+        s3.upload_file(tmp_qr_path, BUCKET_NAME, f"{s3_folder}/{qr_filename}",
                        ExtraArgs={'ACL': 'public-read'})
+        os.remove(tmp_qr_path)
 
         write_log(group_id, group_name, s3_folder, uploaded_files, qr_filename, qr_url, date_str)
 
@@ -108,7 +109,7 @@ def upload():
         <h3>✅ 업로드 완료</h3>
         <p>Group: {group_name} ({group_id})</p>
         <p><a href='{qr_url}' target='_blank'>{qr_url}</a></p>
-        <img src='/static/{qr_filename}' width='200'><br>
+        <img src='https://{BUCKET_NAME}.s3.{REGION_NAME}.wasabisys.com/{s3_folder}/{qr_filename}' width='200'><br>
         <a href='/'>다시 업로드하기</a>
         """
 
@@ -116,9 +117,6 @@ def upload():
 
 # ==== QR 생성 함수 ====
 def create_qr_with_logo(url, output_path, logo_path='static/logo.png', size_ratio=0.25):
-    # static 디렉토리가 없으면 자동 생성
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
     qr.add_data(url)
     qr.make(fit=True)
@@ -140,7 +138,7 @@ def write_log(group_id, name, folder, files, qr_file, qr_url, date):
             writer.writerow(['group_id', 'group_name', 's3_folder', 'video1', 'video2', 'qr_filename', 'qr_url', 'upload_date'])
         writer.writerow([group_id, name, folder, files[0], files[1], qr_file, qr_url, date])
 
-# ==== 사용자 앱에서 호출할 API ====
+# ==== 사용자 앱에서 호출하는 API ====
 @app.route('/api/group/<group_id>')
 def api_group(group_id):
     try:
@@ -167,6 +165,5 @@ def logout():
     return redirect('/login')
 
 if __name__ == '__main__':
-    import os
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
