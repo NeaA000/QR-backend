@@ -11,6 +11,7 @@ import qrcode
 from PIL import Image
 from urllib.parse import quote
 from dotenv import load_dotenv
+import requests
 
 # ==== .env 로딩 ====
 load_dotenv()
@@ -30,6 +31,7 @@ BUCKET_NAME = os.getenv("BUCKET_NAME")
 APP_BASE_URL = os.getenv("APP_BASE_URL")
 WASABI_ENDPOINT = f"https://s3.{REGION_NAME}.wasabisys.com"
 WASABI_HOSTING_BASE = f"https://{BUCKET_NAME}.s3.{REGION_NAME}.wasabisys.com"
+BRANCH_KEY = os.getenv("BRANCH_KEY")
 
 # ==== S3 클라이언트 ====
 s3 = boto3.client(
@@ -46,6 +48,22 @@ config = TransferConfig(
     max_concurrency=5,
     use_threads=True
 )
+
+# ==== Branch 딥링크 생성 ====
+def create_branch_link(group_id):
+    payload = {
+        "branch_key": BRANCH_KEY,
+        "campaign": "qr_video",
+        "channel": "qr",
+        "feature": "video_upload",
+        "data": {
+            "group_id": group_id,
+            "type": "video",
+            "$fallback_url": APP_BASE_URL + "/info"
+        }
+    }
+    r = requests.post("https://api2.branch.io/v1/url", json=payload)
+    return r.json().get("url")
 
 # ==== 관리자 로그인 ====
 @app.route('/login', methods=['GET', 'POST'])
@@ -73,12 +91,11 @@ def upload():
         if not group_name or len(files) != 2:
             return "그룹 이름과 영상 2개를 모두 업로드해주세요.", 400
 
-        group_id = uuid.uuid4().hex
+        group_id = "v_" + uuid.uuid4().hex
         date_str = datetime.now().strftime('%Y%m%d')
         safe_name = re.sub(r'[^\w\uac00-\ud7a3]', '_', group_name)
         qr_filename = f"{safe_name}_{date_str}.png"
         tmp_qr_path = f"/tmp/{qr_filename}"
-        qr_url = f"{APP_BASE_URL}/{group_id}"
         s3_folder = f"groups/{group_name}_{date_str}"
 
         uploaded_files = []
@@ -97,6 +114,7 @@ def upload():
             tmp_path.unlink(missing_ok=True)
             uploaded_files.append(filename)
 
+        qr_url = create_branch_link(group_id)
         create_qr_with_logo(qr_url, tmp_qr_path)
 
         s3.upload_file(tmp_qr_path, BUCKET_NAME, f"{s3_folder}/{qr_filename}",
