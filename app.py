@@ -109,9 +109,10 @@ def upload():
         <h3>✅ 업로드 완료</h3>
         <p>Group: {group_name} ({group_id})</p>
         <p><a href='{qr_url}' target='_blank'>{qr_url}</a></p>
-        <img src='https://{BUCKET_NAME}.s3.{REGION_NAME}.wasabisys.com/{s3_folder}/{qr_filename}' width='200'><br>
+        <img src='{WASABI_BASE}/{quote(s3_folder)}/{qr_filename}' width='200'><br>
         <a href='/'>다시 업로드하기</a>
         """
+
 
     return render_template('upload.html')
 
