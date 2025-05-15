@@ -29,7 +29,7 @@ REGION_NAME = os.getenv("REGION_NAME")
 BUCKET_NAME = os.getenv("BUCKET_NAME")
 APP_BASE_URL = os.getenv("APP_BASE_URL")
 WASABI_ENDPOINT = f"https://s3.{REGION_NAME}.wasabisys.com"
-WASABI_BASE = f"{WASABI_ENDPOINT}/{BUCKET_NAME}"
+WASABI_HOSTING_BASE = f"https://{BUCKET_NAME}.s3.{REGION_NAME}.wasabisys.com"
 
 # ==== S3 클라이언트 ====
 s3 = boto3.client(
@@ -78,7 +78,7 @@ def upload():
         safe_name = re.sub(r'[^\w\uac00-\ud7a3]', '_', group_name)
         qr_filename = f"{safe_name}_{date_str}.png"
         tmp_qr_path = f"/tmp/{qr_filename}"
-        qr_url = f"{APP_BASE_URL}{group_id}"
+        qr_url = f"{APP_BASE_URL}/{group_id}"
         s3_folder = f"groups/{group_name}_{date_str}"
 
         uploaded_files = []
@@ -105,14 +105,15 @@ def upload():
 
         write_log(group_id, group_name, s3_folder, uploaded_files, qr_filename, qr_url, date_str)
 
+        qr_img_url = f"{WASABI_HOSTING_BASE}/{quote(s3_folder)}/{qr_filename}"
+
         return f"""
         <h3>✅ 업로드 완료</h3>
         <p>Group: {group_name} ({group_id})</p>
         <p><a href='{qr_url}' target='_blank'>{qr_url}</a></p>
-        <img src='{WASABI_BASE}/{quote(s3_folder)}/{qr_filename}' width='200'><br>
+        <img src='{qr_img_url}' width='200'><br>
         <a href='/'>다시 업로드하기</a>
         """
-
 
     return render_template('upload.html')
 
@@ -148,8 +149,8 @@ def api_group(group_id):
             for row in reader:
                 if row['group_id'] == group_id:
                     folder = row['s3_folder']
-                    v1 = f"{WASABI_BASE}/{quote(folder)}/{row['video1']}"
-                    v2 = f"{WASABI_BASE}/{quote(folder)}/{row['video2']}"
+                    v1 = f"{WASABI_HOSTING_BASE}/{quote(folder)}/{row['video1']}"
+                    v2 = f"{WASABI_HOSTING_BASE}/{quote(folder)}/{row['video2']}"
                     return jsonify({
                         "groupName": row['group_name'],
                         "video1": v1,
