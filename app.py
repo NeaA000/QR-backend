@@ -16,7 +16,7 @@ import requests
 # ==== .env 로딩 ====
 load_dotenv()
 
-# ==== Flask 기본 설정 ====
+# ==== Flask 설정 ====
 UPLOAD_LOG = 'upload_log.csv'
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "dev-secret")
@@ -62,8 +62,17 @@ def create_branch_link(group_id):
             "$fallback_url": APP_BASE_URL + "/info"
         }
     }
-    r = requests.post("https://api2.branch.io/v1/url", json=payload)
-    return r.json().get("url")
+    try:
+        r = requests.post("https://api2.branch.io/v1/url", json=payload)
+        print("[BRANCH] status:", r.status_code)
+        print("[BRANCH] response:", r.text)
+        if r.status_code == 200:
+            return r.json().get("url")
+    except Exception as e:
+        print("[BRANCH] Exception:", e)
+
+    # 실패 시 fallback 처리
+    return APP_BASE_URL + "/info"
 
 # ==== 관리자 로그인 ====
 @app.route('/login', methods=['GET', 'POST'])
@@ -75,10 +84,10 @@ def login():
             session['admin'] = True
             return redirect(url_for('upload'))
         else:
-            return render_template('login.html', error="❌ 아이디 또는 비밀번호가 틀릴습니다.")
+            return render_template('login.html', error="❌ 아이디 또는 비밀번호가 틀렸습니다.")
     return render_template('login.html')
 
-# ==== 업로드 폼 + QR 생성 ====
+# ==== 업로드 및 QR 생성 ====
 @app.route('/', methods=['GET', 'POST'])
 def upload():
     if not session.get('admin'):
@@ -93,7 +102,7 @@ def upload():
 
         group_id = "v_" + uuid.uuid4().hex
         date_str = datetime.now().strftime('%Y%m%d')
-        safe_name = re.sub(r'[^\w]', '_', group_name)  # 한글 제거
+        safe_name = re.sub(r'[^\w]', '_', group_name)
         qr_filename = f"{safe_name}_{date_str}.png"
         tmp_qr_path = f"/tmp/{qr_filename}"
         s3_folder = f"groups/{safe_name}_{date_str}"
@@ -115,6 +124,7 @@ def upload():
             uploaded_files.append(filename)
 
         qr_url = create_branch_link(group_id)
+        print("[QR] 최종 URL:", qr_url)  # ✅ 출력
         create_qr_with_logo(qr_url, tmp_qr_path)
 
         s3.upload_file(tmp_qr_path, BUCKET_NAME, f"{s3_folder}/{qr_filename}",
@@ -135,7 +145,7 @@ def upload():
 
     return render_template('upload.html')
 
-# ==== QR 생성 함수 ====
+# ==== QR 코드 생성 함수 ====
 def create_qr_with_logo(url, output_path, logo_path='static/logo.png', size_ratio=0.25):
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
     qr.add_data(url)
@@ -158,7 +168,7 @@ def write_log(group_id, name, folder, files, qr_file, qr_url, date):
             writer.writerow(['group_id', 'group_name', 's3_folder', 'video1', 'video2', 'qr_filename', 'qr_url', 'upload_date'])
         writer.writerow([group_id, name, folder, files[0], files[1], qr_file, qr_url, date])
 
-# ==== 사용자 앱에서 호출하는 API ====
+# ==== 앱에서 호출하는 API ====
 @app.route('/api/group/<group_id>')
 def api_group(group_id):
     try:
