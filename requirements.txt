@@ -4,3 +4,4 @@ qrcode
 Pillow
 python-dotenv
 requests
+unidecode

@@ -12,6 +12,7 @@ from PIL import Image
 from urllib.parse import quote
 from dotenv import load_dotenv
 import requests
+from unidecode import unidecode  # ✅ 추가
 
 # ==== .env 로딩 ====
 load_dotenv()
@@ -50,14 +51,20 @@ config = TransferConfig(
 )
 
 # ==== Branch 딥링크 생성 ====
-def create_branch_link(group_id):
+def create_branch_link(group_id, group_name):
+    group_slug = unidecode(group_name).replace(" ", "_")
+    date_str = datetime.now().strftime('%Y%m%d')
+    alias = f"video_{group_slug}_{date_str}"
+
     payload = {
         "branch_key": BRANCH_KEY,
         "campaign": "qr_video",
         "channel": "qr",
         "feature": "video_upload",
+        "alias": alias,
         "data": {
             "group_id": group_id,
+            "group_name": group_name,
             "type": "video",
             "$fallback_url": APP_BASE_URL + "/info"
         }
@@ -71,7 +78,6 @@ def create_branch_link(group_id):
     except Exception as e:
         print("[BRANCH] Exception:", e)
 
-    # 실패 시 fallback 처리
     return APP_BASE_URL + "/info"
 
 # ==== 관리자 로그인 ====
@@ -123,8 +129,9 @@ def upload():
             tmp_path.unlink(missing_ok=True)
             uploaded_files.append(filename)
 
-        qr_url = create_branch_link(group_id)
-        print("[QR] 최종 URL:", qr_url)  # ✅ 출력
+        # ✅ 그룹 이름도 함께 전달하여 slug + alias 구성
+        qr_url = create_branch_link(group_id, group_name)
+        print("[QR] 최종 URL:", qr_url)
         create_qr_with_logo(qr_url, tmp_qr_path)
 
         s3.upload_file(tmp_qr_path, BUCKET_NAME, f"{s3_folder}/{qr_filename}",
