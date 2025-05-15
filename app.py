@@ -12,7 +12,7 @@ from PIL import Image
 from urllib.parse import quote
 from dotenv import load_dotenv
 import requests
-from unidecode import unidecode  # ✅ 추가
+from unidecode import unidecode
 
 # ==== .env 로딩 ====
 load_dotenv()
@@ -66,7 +66,7 @@ def create_branch_link(group_id, group_name):
             "group_id": group_id,
             "group_name": group_name,
             "type": "video",
-            "$fallback_url": APP_BASE_URL + "/info"
+            "$fallback_url": APP_BASE_URL + f"/video_{group_slug}_{date_str}"
         }
     }
     try:
@@ -79,6 +79,16 @@ def create_branch_link(group_id, group_name):
         print("[BRANCH] Exception:", e)
 
     return APP_BASE_URL + "/info"
+
+# ==== 안내 fallback 페이지 ====
+@app.route('/video_<slug>')
+def video_redirect(slug):
+    return f"""
+    <h3>📱 이 콘텐츠는 모바일 앱에서 재생됩니다</h3>
+    <p>슬러그: <b>{slug}</b></p>
+    <p>앱이 설치되어 있다면 자동으로 열립니다.<br>
+    설치되어 있지 않다면 앱스토어 또는 이 페이지로 안내됩니다.</p>
+    """
 
 # ==== 관리자 로그인 ====
 @app.route('/login', methods=['GET', 'POST'])
@@ -129,7 +139,6 @@ def upload():
             tmp_path.unlink(missing_ok=True)
             uploaded_files.append(filename)
 
-        # ✅ 그룹 이름도 함께 전달하여 slug + alias 구성
         qr_url = create_branch_link(group_id, group_name)
         print("[QR] 최종 URL:", qr_url)
         create_qr_with_logo(qr_url, tmp_qr_path)
@@ -201,6 +210,7 @@ def logout():
     session.clear()
     return redirect('/login')
 
+# ==== Flask 실행 ====
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
