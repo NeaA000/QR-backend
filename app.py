@@ -75,7 +75,7 @@ def login():
             session['admin'] = True
             return redirect(url_for('upload'))
         else:
-            return render_template('login.html', error="❌ 아이디 또는 비밀번호가 틀렸습니다.")
+            return render_template('login.html', error="❌ 아이디 또는 비밀번호가 틀릴습니다.")
     return render_template('login.html')
 
 # ==== 업로드 폼 + QR 생성 ====
@@ -93,10 +93,10 @@ def upload():
 
         group_id = "v_" + uuid.uuid4().hex
         date_str = datetime.now().strftime('%Y%m%d')
-        safe_name = re.sub(r'[^\w\uac00-\ud7a3]', '_', group_name)
+        safe_name = re.sub(r'[^\w]', '_', group_name)  # 한글 제거
         qr_filename = f"{safe_name}_{date_str}.png"
         tmp_qr_path = f"/tmp/{qr_filename}"
-        s3_folder = f"groups/{group_name}_{date_str}"
+        s3_folder = f"groups/{safe_name}_{date_str}"
 
         uploaded_files = []
         for idx, file in enumerate(files):
@@ -123,7 +123,7 @@ def upload():
 
         write_log(group_id, group_name, s3_folder, uploaded_files, qr_filename, qr_url, date_str)
 
-        qr_img_url = f"{WASABI_HOSTING_BASE}/{quote(s3_folder)}/{qr_filename}"
+        qr_img_url = f"{WASABI_HOSTING_BASE}/{quote(s3_folder)}/{quote(qr_filename)}"
 
         return f"""
         <h3>✅ 업로드 완료</h3>

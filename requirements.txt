@@ -3,3 +3,4 @@ boto3
 qrcode
 Pillow
 python-dotenv
+requests
