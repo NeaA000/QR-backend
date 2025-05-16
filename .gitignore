@@ -14,3 +14,5 @@ __pycache__/
 # 📦 가상환경 폴더 (예: venv, env)
 venv/
 env/
+
+firebase_key.json

@@ -1,5 +1,4 @@
 import os
-import csv
 import uuid
 import re
 from pathlib import Path
@@ -13,18 +12,19 @@ from urllib.parse import quote
 from dotenv import load_dotenv
 import requests
 from unidecode import unidecode
+import firebase_admin
+from firebase_admin import credentials, firestore
 
-# ==== .env 로드 ==== 
+# ==== .env 로드 ====
 load_dotenv()
 
-# ==== Flask 설정 ==== 
-UPLOAD_LOG = 'upload_log.csv'
+# ==== Flask 설정 ====
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "dev-secret")
 app.config['UPLOAD_FOLDER'] = 'static'
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 최대 2GB
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024
 
-# ==== 환경 변수 ==== 
+# ==== 환경 변수 ====
 ADMIN_ID = os.getenv("ADMIN_ID", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 REGION_NAME = os.getenv("REGION_NAME")
@@ -34,7 +34,12 @@ WASABI_ENDPOINT = f"https://s3.{REGION_NAME}.wasabisys.com"
 WASABI_HOSTING_BASE = f"https://{BUCKET_NAME}.s3.{REGION_NAME}.wasabisys.com"
 BRANCH_KEY = os.getenv("BRANCH_KEY")
 
-# ==== S3 클라이언트 ==== 
+# ==== Firebase Admin SDK 초기화 ====
+cred = credentials.Certificate("firebase_key.json")
+firebase_admin.initialize_app(cred)
+db = firestore.client()
+
+# ==== S3 클라이언트 ====
 s3 = boto3.client(
     's3',
     aws_access_key_id=os.getenv("AWS_ACCESS_KEY"),
@@ -50,12 +55,11 @@ config = TransferConfig(
     use_threads=True
 )
 
-# ==== Branch 딥링크 생성 ==== 
+# ==== Branch 딥링크 생성 ====
 def create_branch_link(group_id, group_name):
     group_slug = unidecode(group_name).replace(" ", "_")
     date_str = datetime.now().strftime('%Y%m%d')
     alias = f"video_{group_slug}_{date_str}"
-
     payload = {
         "branch_key": BRANCH_KEY,
         "campaign": "qr_video",
@@ -77,34 +81,32 @@ def create_branch_link(group_id, group_name):
             return r.json().get("url")
     except Exception as e:
         print("[BRANCH] Exception:", e)
-
     return APP_BASE_URL + "/info"
 
-# ==== alias로 group_id 찾기 API ==== 
+# ==== alias로 group_id 찾기 API ====
 @app.route('/api/alias/<alias>')
 def alias_to_group(alias):
     try:
-        with open(UPLOAD_LOG, encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                qr_url = row.get('qr_url')
-                if qr_url and qr_url.endswith(f"/{alias}"):
-                    return jsonify({'group_id': row['group_id']})
+        docs = db.collection("uploads").stream()
+        for doc in docs:
+            data = doc.to_dict()
+            if data.get("qr_url", "").endswith(f"/{alias}"):
+                return jsonify({"group_id": data["group_id"]})
         return jsonify({'error': 'Not found'}), 404
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# ==== 안내 fallback 페이지 ==== 
+# ==== 안내 fallback 페이지 ====
 @app.route('/video_<slug>')
 def video_redirect(slug):
     return f"""
-    <h3>📱 이 컨텐츠는 모바일 앱에서 재생됩니다</h3>
+    <h3>📱 이 콘텐츠는 모바일 앱에서 재생됩니다</h3>
     <p>슬러그: <b>{slug}</b></p>
     <p>앱이 설치되어 있다면 자동으로 열립니다.<br>
-    설치되어 있지 않다면 앱스토어 또는 이 페이지로 안내됩니다.</p>
+    설치되어 없다면 앱스토어 또는 이 페이지로 안내됩니다.</p>
     """
 
-# ==== 관리자 로그인 ==== 
+# ==== 관리자 로그인 ====
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -117,7 +119,7 @@ def login():
             return render_template('login.html', error="❌ 아이디 또는 비밀번호가 틀렸습니다.")
     return render_template('login.html')
 
-# ==== 업로드 및 QR 생성 ==== 
+# ==== 업로드 및 QR 생성 ====
 @app.route('/', methods=['GET', 'POST'])
 def upload():
     if not session.get('admin'):
@@ -126,7 +128,6 @@ def upload():
     if request.method == 'POST':
         group_name = request.form.get('group_name')
         files = request.files.getlist('files')
-
         if not group_name or len(files) != 2:
             return "그룹 이름과 영상 2개를 모두 업로드해주세요.", 400
 
@@ -143,7 +144,6 @@ def upload():
             filename = f"video{idx + 1}.{ext}"
             tmp_path = Path(f"/tmp/temp_{filename}")
             file.save(tmp_path)
-
             s3_key = f"{s3_folder}/{filename}"
             s3.upload_file(
                 str(tmp_path), BUCKET_NAME, s3_key,
@@ -156,15 +156,22 @@ def upload():
         qr_url = create_branch_link(group_id, group_name)
         print("[QR] 최종 URL:", qr_url)
         create_qr_with_logo(qr_url, tmp_qr_path)
-
         s3.upload_file(tmp_qr_path, BUCKET_NAME, f"{s3_folder}/{qr_filename}",
                        ExtraArgs={'ACL': 'public-read'})
         os.remove(tmp_qr_path)
 
-        write_log(group_id, group_name, s3_folder, uploaded_files, qr_filename, qr_url, date_str)
+        db.collection("uploads").document(group_id).set({
+            "group_id": group_id,
+            "group_name": group_name,
+            "s3_folder": s3_folder,
+            "video1": uploaded_files[0],
+            "video2": uploaded_files[1],
+            "qr_filename": qr_filename,
+            "qr_url": qr_url,
+            "upload_date": date_str
+        })
 
         qr_img_url = f"{WASABI_HOSTING_BASE}/{quote(s3_folder)}/{quote(qr_filename)}"
-
         return f"""
         <h3>✅ 업로드 완료</h3>
         <p>Group: {group_name} ({group_id})</p>
@@ -172,10 +179,9 @@ def upload():
         <img src='{qr_img_url}' width='200'><br>
         <a href='/'>다시 업로드하기</a>
         """
-
     return render_template('upload.html')
 
-# ==== QR 코드 생성 함수 ==== 
+# ==== QR 코드 생성 함수 ====
 def create_qr_with_logo(url, output_path, logo_path='static/logo.png', size_ratio=0.25):
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
     qr.add_data(url)
@@ -189,42 +195,13 @@ def create_qr_with_logo(url, output_path, logo_path='static/logo.png', size_rati
         qr_img.paste(logo, pos, mask=logo if logo.mode == 'RGBA' else None)
     qr_img.save(output_path)
 
-# ==== 업로드 로그 기록 ==== 
-def write_log(group_id, name, folder, files, qr_file, qr_url, date):
-    csv_exists = os.path.exists(UPLOAD_LOG)
-    with open(UPLOAD_LOG, 'a', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        if not csv_exists:
-            writer.writerow(['group_id', 'group_name', 's3_folder', 'video1', 'video2', 'qr_filename', 'qr_url', 'upload_date'])
-        writer.writerow([group_id, name, folder, files[0], files[1], qr_file, qr_url, date])
-
-# ==== 앱에서 호출하는 API ==== 
-@app.route('/api/group/<group_id>')
-def api_group(group_id):
-    try:
-        with open(UPLOAD_LOG, encoding='utf-8') as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                if row['group_id'] == group_id:
-                    folder = row['s3_folder']
-                    v1 = f"{WASABI_HOSTING_BASE}/{quote(folder)}/{row['video1']}"
-                    v2 = f"{WASABI_HOSTING_BASE}/{quote(folder)}/{row['video2']}"
-                    return jsonify({
-                        "groupName": row['group_name'],
-                        "video1": v1,
-                        "video2": v2
-                    })
-        return jsonify({"error": "Group not found"}), 404
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# ==== 로그아웃 ==== 
+# ==== 로그아웃 ====
 @app.route('/logout')
 def logout():
     session.clear()
     return redirect('/login')
 
-# ==== Flask 실행 ==== 
+# ==== Flask 실행 ====
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
