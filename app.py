@@ -1,6 +1,7 @@
 import os
 import uuid
 import re
+import json
 from pathlib import Path
 from datetime import datetime
 from flask import Flask, request, redirect, render_template, session, url_for, jsonify
@@ -15,10 +16,10 @@ from unidecode import unidecode
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# ==== .env 검색 ==== 
+# ==== 환경 변수 로드 ====
 load_dotenv()
 
-# ==== Firebase Admin 초기화 ==== 
+# ==== Firebase Admin 초기화 ====
 firebase_config = {
     "type": os.getenv("type"),
     "project_id": os.getenv("project_id"),
@@ -36,23 +37,23 @@ cred = credentials.Certificate(firebase_config)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-# ==== Flask 설정 ==== 
+# ==== Flask 설정 ====
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "dev-secret")
 app.config['UPLOAD_FOLDER'] = 'static'
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB
 
-# ==== 환경 변수 ==== 
-ADMIN_ID = os.getenv("ADMIN_ID", "admin")
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
+# ==== 환경 변수 ====
+ADMIN_ID = os.getenv("ADMIN_ID")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 REGION_NAME = os.getenv("REGION_NAME")
 BUCKET_NAME = os.getenv("BUCKET_NAME")
 APP_BASE_URL = os.getenv("APP_BASE_URL")
+BRANCH_KEY = os.getenv("BRANCH_KEY")
 WASABI_ENDPOINT = f"https://s3.{REGION_NAME}.wasabisys.com"
 WASABI_HOSTING_BASE = f"https://{BUCKET_NAME}.s3.{REGION_NAME}.wasabisys.com"
-BRANCH_KEY = os.getenv("BRANCH_KEY")
 
-# ==== S3 클라이언트 ==== 
+# ==== S3 클라이언트 설정 ====
 s3 = boto3.client(
     's3',
     aws_access_key_id=os.getenv("AWS_ACCESS_KEY"),
@@ -67,12 +68,25 @@ config = TransferConfig(
     use_threads=True
 )
 
-# ==== Branch 딩링크 생성 ==== 
+# ==== QR 코드 생성 ====
+def create_qr_with_logo(url, output_path, logo_path='static/logo.png', size_ratio=0.25):
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
+    qr.add_data(url)
+    qr.make(fit=True)
+    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    if os.path.exists(logo_path):
+        logo = Image.open(logo_path)
+        size = int(qr_img.size[0] * size_ratio)
+        logo = logo.resize((size, size), Image.LANCZOS)
+        pos = ((qr_img.size[0] - size) // 2, (qr_img.size[1] - size) // 2)
+        qr_img.paste(logo, pos, mask=logo if logo.mode == 'RGBA' else None)
+    qr_img.save(output_path)
+
+# ==== Branch 딥링크 생성 ====
 def create_branch_link(group_id, group_name):
     group_slug = unidecode(group_name).replace(" ", "_")
     date_str = datetime.now().strftime('%Y%m%d')
     alias = f"video_{group_slug}_{date_str}"
-
     payload = {
         "branch_key": BRANCH_KEY,
         "campaign": "qr_video",
@@ -83,44 +97,18 @@ def create_branch_link(group_id, group_name):
             "group_id": group_id,
             "group_name": group_name,
             "type": "video",
-            "$fallback_url": APP_BASE_URL + f"/video_{group_slug}_{date_str}"
+            "$fallback_url": f"{APP_BASE_URL}/video_{group_slug}_{date_str}"
         }
     }
     try:
         r = requests.post("https://api2.branch.io/v1/url", json=payload)
-        print("[BRANCH] status:", r.status_code)
-        print("[BRANCH] response:", r.text)
         if r.status_code == 200:
             return r.json().get("url")
     except Exception as e:
-        print("[BRANCH] Exception:", e)
-    return APP_BASE_URL + "/info"
+        print("[BRANCH] Error:", e)
+    return f"{APP_BASE_URL}/info"
 
-# ==== 아리아스 따로 group_id 찾기 ==== 
-@app.route('/api/alias/<alias>')
-def alias_to_group(alias):
-    try:
-        docs = db.collection("uploads").stream()
-        for doc in docs:
-            data = doc.to_dict()
-            qr_url = data.get("qr_url")
-            if qr_url and qr_url.endswith(f"/{alias}"):
-                return jsonify({"group_id": data.get("group_id")})
-        return jsonify({"error": "Not found"}), 404
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# ==== fallback 페이지 ==== 
-@app.route('/video_<slug>')
-def video_redirect(slug):
-    return f"""
-    <h3>📱 이 컨틹스는 모바일 앱에서 재생됩니다</h3>
-    <p>슬러그: <b>{slug}</b></p>
-    <p>앱이 설치되어 있다면 자동으로 열립니다.<br>
-    설치되어 없다면 앱스토어 또는 이 페이지로 안내됩니다.</p>
-    """
-
-# ==== 관리자 로그인 ==== 
+# ==== 관리자 로그인 ====
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -130,10 +118,10 @@ def login():
             session['admin'] = True
             return redirect(url_for('upload'))
         else:
-            return render_template('login.html', error="❌ 아이디 또는 비밀번호가 트린아지지 않았습니다.")
+            return render_template('login.html', error="❌ 아이디 또는 비밀번호가 틀렸습니다.")
     return render_template('login.html')
 
-# ==== 업로드 및 QR 생성 ==== 
+# ==== 메인 업로드 페이지 ====
 @app.route('/', methods=['GET', 'POST'])
 def upload():
     if not session.get('admin'):
@@ -149,9 +137,9 @@ def upload():
         group_id = "v_" + uuid.uuid4().hex
         date_str = datetime.now().strftime('%Y%m%d')
         safe_name = re.sub(r'[^\w]', '_', group_name)
+        s3_folder = f"groups/{safe_name}_{date_str}"
         qr_filename = f"{safe_name}_{date_str}.png"
         tmp_qr_path = f"/tmp/{qr_filename}"
-        s3_folder = f"groups/{safe_name}_{date_str}"
 
         uploaded_files = []
         for idx, file in enumerate(files):
@@ -159,71 +147,90 @@ def upload():
             filename = f"video{idx + 1}.{ext}"
             tmp_path = Path(f"/tmp/temp_{filename}")
             file.save(tmp_path)
-
             s3_key = f"{s3_folder}/{filename}"
-            s3.upload_file(
-                str(tmp_path), BUCKET_NAME, s3_key,
-                ExtraArgs={'ACL': 'public-read'},
-                Config=config
-            )
+            s3.upload_file(str(tmp_path), BUCKET_NAME, s3_key,
+                           ExtraArgs={'ACL': 'public-read'}, Config=config)
             tmp_path.unlink(missing_ok=True)
             uploaded_files.append(filename)
 
         qr_url = create_branch_link(group_id, group_name)
-        print("[QR] 체중 URL:", qr_url)
         create_qr_with_logo(qr_url, tmp_qr_path)
-
         s3.upload_file(tmp_qr_path, BUCKET_NAME, f"{s3_folder}/{qr_filename}",
                        ExtraArgs={'ACL': 'public-read'})
         os.remove(tmp_qr_path)
-
-        video1 = uploaded_files[0] if len(uploaded_files) > 0 else None
-        video2 = uploaded_files[1] if len(uploaded_files) > 1 else None
 
         db.collection("uploads").document(group_id).set({
             "group_id": group_id,
             "group_name": group_name,
             "s3_folder": s3_folder,
-            "video1": video1,
-            "video2": video2,
+            "video1": uploaded_files[0] if len(uploaded_files) > 0 else None,
+            "video2": uploaded_files[1] if len(uploaded_files) > 1 else None,
             "qr_filename": qr_filename,
             "qr_url": qr_url,
             "upload_date": date_str
         })
 
         qr_img_url = f"{WASABI_HOSTING_BASE}/{quote(s3_folder)}/{quote(qr_filename)}"
-
         return f"""
         <h3>✅ 업로드 완료</h3>
         <p>Group: {group_name} ({group_id})</p>
-        <p><a href='{qr_url}' target='_blank'>{qr_url}</a></p>
-        <img src='{qr_img_url}' width='200'><br>
-        <a href='/'>다시 업로드하기</a>
+        <p><a href="{qr_url}" target="_blank">{qr_url}</a></p>
+        <img src="{qr_img_url}" width="200"><br>
+        <a href="/">다시 업로드하기</a>
         """
 
     return render_template('upload.html')
 
-# ==== QR 코드 생성 함수 ==== 
-def create_qr_with_logo(url, output_path, logo_path='static/logo.png', size_ratio=0.25):
-    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
-    qr.add_data(url)
-    qr.make(fit=True)
-    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-    if os.path.exists(logo_path):
-        logo = Image.open(logo_path)
-        size = int(qr_img.size[0] * size_ratio)
-        logo = logo.resize((size, size), Image.LANCZOS)
-        pos = ((qr_img.size[0] - size) // 2, (qr_img.size[1] - size) // 2)
-        qr_img.paste(logo, pos, mask=logo if logo.mode == 'RGBA' else None)
-    qr_img.save(output_path)
+# ==== alias -> group_id ====
+@app.route('/api/alias/<alias>')
+def alias_to_group(alias):
+    try:
+        docs = db.collection("uploads").stream()
+        for doc in docs:
+            data = doc.to_dict()
+            qr_url = data.get("qr_url")
+            if qr_url and qr_url.endswith(f"/{alias}"):
+                return jsonify({"group_id": data.get("group_id")})
+        return jsonify({"error": "Not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-# ==== 로그아웃 ==== 
+# ==== group_id → 영상 데이터 ====
+@app.route('/api/group/<group_id>')
+def group_data(group_id):
+    try:
+        doc = db.collection("uploads").document(group_id).get()
+        if doc.exists:
+            data = doc.to_dict()
+            folder = data['s3_folder']
+            v1 = f"{WASABI_HOSTING_BASE}/{quote(folder)}/{data['video1']}" if data.get("video1") else None
+            v2 = f"{WASABI_HOSTING_BASE}/{quote(folder)}/{data['video2']}" if data.get("video2") else None
+            return jsonify({
+                "groupName": data.get('group_name'),
+                "video1": v1,
+                "video2": v2
+            })
+        return jsonify({"error": "Group not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ==== Fallback 안내 페이지 ====
+@app.route('/video_<slug>')
+def video_redirect(slug):
+    return f"""
+    <h3>📱 이 콘텐츠는 모바일 앱에서 재생됩니다</h3>
+    <p>슬러그: <b>{slug}</b></p>
+    <p>앱이 설치되어 있다면 자동으로 열립니다.<br>
+    설치되어 있지 않다면 앱스토어 또는 이 페이지로 안내됩니다.</p>
+    """
+
+# ==== 로그아웃 ====
 @app.route('/logout')
 def logout():
     session.clear()
     return redirect('/login')
 
-# ==== Flask 실행 ==== 
+# ==== 실행 ====
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
