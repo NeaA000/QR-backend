@@ -19,7 +19,19 @@ from firebase_admin import credentials, firestore
 load_dotenv()
 
 # ==== Firebase Admin 초기화 ====
-cred = credentials.Certificate("firebase_key.json")
+firebase_config = {
+    "type": os.getenv("FIREBASE_TYPE"),
+    "project_id": os.getenv("FIREBASE_PROJECT_ID"),
+    "private_key_id": os.getenv("FIREBASE_PRIVATE_KEY_ID"),
+    "private_key": os.getenv("FIREBASE_PRIVATE_KEY").replace("\\n", "\n"),
+    "client_email": os.getenv("FIREBASE_CLIENT_EMAIL"),
+    "client_id": os.getenv("FIREBASE_CLIENT_ID"),
+    "auth_uri": os.getenv("FIREBASE_AUTH_URI"),
+    "token_uri": os.getenv("FIREBASE_TOKEN_URI"),
+    "auth_provider_x509_cert_url": os.getenv("FIREBASE_AUTH_PROVIDER_CERT_URL"),
+    "client_x509_cert_url": os.getenv("FIREBASE_CLIENT_CERT_URL"),
+}
+cred = credentials.Certificate(firebase_config)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
@@ -47,7 +59,6 @@ s3 = boto3.client(
     region_name=REGION_NAME,
     endpoint_url=WASABI_ENDPOINT
 )
-
 config = TransferConfig(
     multipart_threshold=1024 * 1024 * 25,
     multipart_chunksize=1024 * 1024 * 50,
@@ -55,7 +66,7 @@ config = TransferConfig(
     use_threads=True
 )
 
-# ==== Branch 딥링크 생성 ====
+# ==== Branch 딩링크 생성 ====
 def create_branch_link(group_id, group_name):
     group_slug = unidecode(group_name).replace(" ", "_")
     date_str = datetime.now().strftime('%Y%m%d')
@@ -82,7 +93,6 @@ def create_branch_link(group_id, group_name):
             return r.json().get("url")
     except Exception as e:
         print("[BRANCH] Exception:", e)
-
     return APP_BASE_URL + "/info"
 
 # ==== alias로 group_id 찾기 API ====
@@ -105,7 +115,7 @@ def video_redirect(slug):
     return f"""
     <h3>📱 이 콘텐츠는 모바일 앱에서 재생됩니다</h3>
     <p>슬러그: <b>{slug}</b></p>
-    <p>앱이 설치되어 있다면 자동으로 열립니다.<br>
+    <p>앱이 설치되어 있다면 자동으로 열리드립니다.<br>
     설치되어 없다면 앱스토어 또는 이 페이지로 안내됩니다.</p>
     """
 
@@ -119,7 +129,7 @@ def login():
             session['admin'] = True
             return redirect(url_for('upload'))
         else:
-            return render_template('login.html', error="❌ 아이디 또는 비밀번호가 틀렸습니다.")
+            return render_template('login.html', error="❌ 아이디 또는 비밀번호가 트린아지지 않았습니다.")
     return render_template('login.html')
 
 # ==== 업로드 및 QR 생성 ====
@@ -159,7 +169,7 @@ def upload():
             uploaded_files.append(filename)
 
         qr_url = create_branch_link(group_id, group_name)
-        print("[QR] 최종 URL:", qr_url)
+        print("[QR] 체중 URL:", qr_url)
         create_qr_with_logo(qr_url, tmp_qr_path)
 
         s3.upload_file(tmp_qr_path, BUCKET_NAME, f"{s3_folder}/{qr_filename}",
