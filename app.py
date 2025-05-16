@@ -50,7 +50,7 @@ config = TransferConfig(
     use_threads=True
 )
 
-# ==== Branch 딩링크 생성 ==== 
+# ==== Branch 딥링크 생성 ==== 
 def create_branch_link(group_id, group_name):
     group_slug = unidecode(group_name).replace(" ", "_")
     date_str = datetime.now().strftime('%Y%m%d')
@@ -80,21 +80,21 @@ def create_branch_link(group_id, group_name):
 
     return APP_BASE_URL + "/info"
 
-# ==== alias로 group_id 찾기 API ====
+# ==== alias로 group_id 찾기 API ==== 
 @app.route('/api/alias/<alias>')
 def alias_to_group(alias):
     try:
         with open(UPLOAD_LOG, encoding='utf-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
-                qr_url = row['qr_url']
-                if qr_url.endswith(f"/{alias}"):
+                qr_url = row.get('qr_url')
+                if qr_url and qr_url.endswith(f"/{alias}"):
                     return jsonify({'group_id': row['group_id']})
         return jsonify({'error': 'Not found'}), 404
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-# ==== 안내 fallback 페이지 ====
+# ==== 안내 fallback 페이지 ==== 
 @app.route('/video_<slug>')
 def video_redirect(slug):
     return f"""
@@ -104,7 +104,7 @@ def video_redirect(slug):
     설치되어 있지 않다면 앱스토어 또는 이 페이지로 안내됩니다.</p>
     """
 
-# ==== 관리자 로그인 ====
+# ==== 관리자 로그인 ==== 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -114,10 +114,10 @@ def login():
             session['admin'] = True
             return redirect(url_for('upload'))
         else:
-            return render_template('login.html', error="❌ 아이드 또는 비밀번호가 틀른시와입니다.")
+            return render_template('login.html', error="❌ 아이디 또는 비밀번호가 틀렸습니다.")
     return render_template('login.html')
 
-# ==== 업로드 및 QR 생성 ====
+# ==== 업로드 및 QR 생성 ==== 
 @app.route('/', methods=['GET', 'POST'])
 def upload():
     if not session.get('admin'):
@@ -154,7 +154,7 @@ def upload():
             uploaded_files.append(filename)
 
         qr_url = create_branch_link(group_id, group_name)
-        print("[QR] 첫춘 URL:", qr_url)
+        print("[QR] 최종 URL:", qr_url)
         create_qr_with_logo(qr_url, tmp_qr_path)
 
         s3.upload_file(tmp_qr_path, BUCKET_NAME, f"{s3_folder}/{qr_filename}",
@@ -175,7 +175,7 @@ def upload():
 
     return render_template('upload.html')
 
-# ==== QR 코드 생성 함수 ====
+# ==== QR 코드 생성 함수 ==== 
 def create_qr_with_logo(url, output_path, logo_path='static/logo.png', size_ratio=0.25):
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
     qr.add_data(url)
@@ -189,7 +189,7 @@ def create_qr_with_logo(url, output_path, logo_path='static/logo.png', size_rati
         qr_img.paste(logo, pos, mask=logo if logo.mode == 'RGBA' else None)
     qr_img.save(output_path)
 
-# ==== 업로드 로그 기록 ====
+# ==== 업로드 로그 기록 ==== 
 def write_log(group_id, name, folder, files, qr_file, qr_url, date):
     csv_exists = os.path.exists(UPLOAD_LOG)
     with open(UPLOAD_LOG, 'a', newline='', encoding='utf-8') as f:
@@ -198,7 +198,7 @@ def write_log(group_id, name, folder, files, qr_file, qr_url, date):
             writer.writerow(['group_id', 'group_name', 's3_folder', 'video1', 'video2', 'qr_filename', 'qr_url', 'upload_date'])
         writer.writerow([group_id, name, folder, files[0], files[1], qr_file, qr_url, date])
 
-# ==== 앱에서 호출하는 API ====
+# ==== 앱에서 호출하는 API ==== 
 @app.route('/api/group/<group_id>')
 def api_group(group_id):
     try:
@@ -218,13 +218,13 @@ def api_group(group_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ==== 로그아웃 ====
+# ==== 로그아웃 ==== 
 @app.route('/logout')
 def logout():
     session.clear()
     return redirect('/login')
 
-# ==== Flask 실행 ====
+# ==== Flask 실행 ==== 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
