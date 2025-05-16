@@ -14,17 +14,17 @@ from dotenv import load_dotenv
 import requests
 from unidecode import unidecode
 
-# ==== .env 로딩 ====
+# ==== .env 로드 ==== 
 load_dotenv()
 
-# ==== Flask 설정 ====
+# ==== Flask 설정 ==== 
 UPLOAD_LOG = 'upload_log.csv'
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "dev-secret")
 app.config['UPLOAD_FOLDER'] = 'static'
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 최대 2GB
 
-# ==== 환경 변수 ====
+# ==== 환경 변수 ==== 
 ADMIN_ID = os.getenv("ADMIN_ID", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 REGION_NAME = os.getenv("REGION_NAME")
@@ -34,7 +34,7 @@ WASABI_ENDPOINT = f"https://s3.{REGION_NAME}.wasabisys.com"
 WASABI_HOSTING_BASE = f"https://{BUCKET_NAME}.s3.{REGION_NAME}.wasabisys.com"
 BRANCH_KEY = os.getenv("BRANCH_KEY")
 
-# ==== S3 클라이언트 ====
+# ==== S3 클라이언트 ==== 
 s3 = boto3.client(
     's3',
     aws_access_key_id=os.getenv("AWS_ACCESS_KEY"),
@@ -50,7 +50,7 @@ config = TransferConfig(
     use_threads=True
 )
 
-# ==== Branch 딥링크 생성 ====
+# ==== Branch 딩링크 생성 ==== 
 def create_branch_link(group_id, group_name):
     group_slug = unidecode(group_name).replace(" ", "_")
     date_str = datetime.now().strftime('%Y%m%d')
@@ -80,11 +80,25 @@ def create_branch_link(group_id, group_name):
 
     return APP_BASE_URL + "/info"
 
+# ==== alias로 group_id 찾기 API ====
+@app.route('/api/alias/<alias>')
+def alias_to_group(alias):
+    try:
+        with open(UPLOAD_LOG, encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                qr_url = row['qr_url']
+                if qr_url.endswith(f"/{alias}"):
+                    return jsonify({'group_id': row['group_id']})
+        return jsonify({'error': 'Not found'}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 # ==== 안내 fallback 페이지 ====
 @app.route('/video_<slug>')
 def video_redirect(slug):
     return f"""
-    <h3>📱 이 콘텐츠는 모바일 앱에서 재생됩니다</h3>
+    <h3>📱 이 컨텐츠는 모바일 앱에서 재생됩니다</h3>
     <p>슬러그: <b>{slug}</b></p>
     <p>앱이 설치되어 있다면 자동으로 열립니다.<br>
     설치되어 있지 않다면 앱스토어 또는 이 페이지로 안내됩니다.</p>
@@ -100,7 +114,7 @@ def login():
             session['admin'] = True
             return redirect(url_for('upload'))
         else:
-            return render_template('login.html', error="❌ 아이디 또는 비밀번호가 틀렸습니다.")
+            return render_template('login.html', error="❌ 아이드 또는 비밀번호가 틀른시와입니다.")
     return render_template('login.html')
 
 # ==== 업로드 및 QR 생성 ====
@@ -140,7 +154,7 @@ def upload():
             uploaded_files.append(filename)
 
         qr_url = create_branch_link(group_id, group_name)
-        print("[QR] 최종 URL:", qr_url)
+        print("[QR] 첫춘 URL:", qr_url)
         create_qr_with_logo(qr_url, tmp_qr_path)
 
         s3.upload_file(tmp_qr_path, BUCKET_NAME, f"{s3_folder}/{qr_filename}",
