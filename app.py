@@ -15,33 +15,34 @@ from unidecode import unidecode
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# ==== .env 로드 ====
+# ==== .env 검색 ==== 
 load_dotenv()
 
-# ==== Firebase Admin 초기화 ====
+# ==== Firebase Admin 초기화 ==== 
 firebase_config = {
-    "type": os.getenv("FIREBASE_TYPE"),
-    "project_id": os.getenv("FIREBASE_PROJECT_ID"),
-    "private_key_id": os.getenv("FIREBASE_PRIVATE_KEY_ID"),
-    "private_key": os.getenv("FIREBASE_PRIVATE_KEY").replace("\\n", "\n"),
-    "client_email": os.getenv("FIREBASE_CLIENT_EMAIL"),
-    "client_id": os.getenv("FIREBASE_CLIENT_ID"),
-    "auth_uri": os.getenv("FIREBASE_AUTH_URI"),
-    "token_uri": os.getenv("FIREBASE_TOKEN_URI"),
-    "auth_provider_x509_cert_url": os.getenv("FIREBASE_AUTH_PROVIDER_CERT_URL"),
-    "client_x509_cert_url": os.getenv("FIREBASE_CLIENT_CERT_URL"),
+    "type": os.getenv("type"),
+    "project_id": os.getenv("project_id"),
+    "private_key_id": os.getenv("private_key_id"),
+    "private_key": os.getenv("private_key").replace("\\n", "\n"),
+    "client_email": os.getenv("client_email"),
+    "client_id": os.getenv("client_id"),
+    "auth_uri": os.getenv("auth_uri"),
+    "token_uri": os.getenv("token_uri"),
+    "auth_provider_x509_cert_url": os.getenv("auth_provider_x509_cert_url"),
+    "client_x509_cert_url": os.getenv("client_x509_cert_url"),
+    "universe_domain": os.getenv("universe_domain"),
 }
 cred = credentials.Certificate(firebase_config)
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-# ==== Flask 설정 ====
+# ==== Flask 설정 ==== 
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "dev-secret")
 app.config['UPLOAD_FOLDER'] = 'static'
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 최대 2GB
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024
 
-# ==== 환경 변수 ====
+# ==== 환경 변수 ==== 
 ADMIN_ID = os.getenv("ADMIN_ID", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 REGION_NAME = os.getenv("REGION_NAME")
@@ -51,7 +52,7 @@ WASABI_ENDPOINT = f"https://s3.{REGION_NAME}.wasabisys.com"
 WASABI_HOSTING_BASE = f"https://{BUCKET_NAME}.s3.{REGION_NAME}.wasabisys.com"
 BRANCH_KEY = os.getenv("BRANCH_KEY")
 
-# ==== S3 클라이언트 ====
+# ==== S3 클라이언트 ==== 
 s3 = boto3.client(
     's3',
     aws_access_key_id=os.getenv("AWS_ACCESS_KEY"),
@@ -66,7 +67,7 @@ config = TransferConfig(
     use_threads=True
 )
 
-# ==== Branch 딩링크 생성 ====
+# ==== Branch 딩링크 생성 ==== 
 def create_branch_link(group_id, group_name):
     group_slug = unidecode(group_name).replace(" ", "_")
     date_str = datetime.now().strftime('%Y%m%d')
@@ -95,7 +96,7 @@ def create_branch_link(group_id, group_name):
         print("[BRANCH] Exception:", e)
     return APP_BASE_URL + "/info"
 
-# ==== alias로 group_id 찾기 API ====
+# ==== 아리아스 따로 group_id 찾기 ==== 
 @app.route('/api/alias/<alias>')
 def alias_to_group(alias):
     try:
@@ -109,17 +110,17 @@ def alias_to_group(alias):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# ==== 안내 fallback 페이지 ====
+# ==== fallback 페이지 ==== 
 @app.route('/video_<slug>')
 def video_redirect(slug):
     return f"""
-    <h3>📱 이 콘텐츠는 모바일 앱에서 재생됩니다</h3>
+    <h3>📱 이 컨틹스는 모바일 앱에서 재생됩니다</h3>
     <p>슬러그: <b>{slug}</b></p>
-    <p>앱이 설치되어 있다면 자동으로 열리드립니다.<br>
+    <p>앱이 설치되어 있다면 자동으로 열립니다.<br>
     설치되어 없다면 앱스토어 또는 이 페이지로 안내됩니다.</p>
     """
 
-# ==== 관리자 로그인 ====
+# ==== 관리자 로그인 ==== 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -132,7 +133,7 @@ def login():
             return render_template('login.html', error="❌ 아이디 또는 비밀번호가 트린아지지 않았습니다.")
     return render_template('login.html')
 
-# ==== 업로드 및 QR 생성 ====
+# ==== 업로드 및 QR 생성 ==== 
 @app.route('/', methods=['GET', 'POST'])
 def upload():
     if not session.get('admin'):
@@ -202,7 +203,7 @@ def upload():
 
     return render_template('upload.html')
 
-# ==== QR 코드 생성 함수 ====
+# ==== QR 코드 생성 함수 ==== 
 def create_qr_with_logo(url, output_path, logo_path='static/logo.png', size_ratio=0.25):
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
     qr.add_data(url)
@@ -216,13 +217,13 @@ def create_qr_with_logo(url, output_path, logo_path='static/logo.png', size_rati
         qr_img.paste(logo, pos, mask=logo if logo.mode == 'RGBA' else None)
     qr_img.save(output_path)
 
-# ==== 로그아웃 ====
+# ==== 로그아웃 ==== 
 @app.route('/logout')
 def logout():
     session.clear()
     return redirect('/login')
 
-# ==== Flask 실행 ====
+# ==== Flask 실행 ==== 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
