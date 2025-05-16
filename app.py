@@ -18,11 +18,16 @@ from firebase_admin import credentials, firestore
 # ==== .env 로드 ====
 load_dotenv()
 
+# ==== Firebase Admin 초기화 ====
+cred = credentials.Certificate("firebase_key.json")
+firebase_admin.initialize_app(cred)
+db = firestore.client()
+
 # ==== Flask 설정 ====
 app = Flask(__name__)
 app.secret_key = os.getenv("SECRET_KEY", "dev-secret")
 app.config['UPLOAD_FOLDER'] = 'static'
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 최대 2GB
 
 # ==== 환경 변수 ====
 ADMIN_ID = os.getenv("ADMIN_ID", "admin")
@@ -33,11 +38,6 @@ APP_BASE_URL = os.getenv("APP_BASE_URL")
 WASABI_ENDPOINT = f"https://s3.{REGION_NAME}.wasabisys.com"
 WASABI_HOSTING_BASE = f"https://{BUCKET_NAME}.s3.{REGION_NAME}.wasabisys.com"
 BRANCH_KEY = os.getenv("BRANCH_KEY")
-
-# ==== Firebase Admin SDK 초기화 ====
-cred = credentials.Certificate("firebase_key.json")
-firebase_admin.initialize_app(cred)
-db = firestore.client()
 
 # ==== S3 클라이언트 ====
 s3 = boto3.client(
@@ -60,6 +60,7 @@ def create_branch_link(group_id, group_name):
     group_slug = unidecode(group_name).replace(" ", "_")
     date_str = datetime.now().strftime('%Y%m%d')
     alias = f"video_{group_slug}_{date_str}"
+
     payload = {
         "branch_key": BRANCH_KEY,
         "campaign": "qr_video",
@@ -81,6 +82,7 @@ def create_branch_link(group_id, group_name):
             return r.json().get("url")
     except Exception as e:
         print("[BRANCH] Exception:", e)
+
     return APP_BASE_URL + "/info"
 
 # ==== alias로 group_id 찾기 API ====
@@ -90,11 +92,12 @@ def alias_to_group(alias):
         docs = db.collection("uploads").stream()
         for doc in docs:
             data = doc.to_dict()
-            if data.get("qr_url", "").endswith(f"/{alias}"):
-                return jsonify({"group_id": data["group_id"]})
-        return jsonify({'error': 'Not found'}), 404
+            qr_url = data.get("qr_url")
+            if qr_url and qr_url.endswith(f"/{alias}"):
+                return jsonify({"group_id": data.get("group_id")})
+        return jsonify({"error": "Not found"}), 404
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
 # ==== 안내 fallback 페이지 ====
 @app.route('/video_<slug>')
@@ -128,8 +131,9 @@ def upload():
     if request.method == 'POST':
         group_name = request.form.get('group_name')
         files = request.files.getlist('files')
-        if not group_name or len(files) != 2:
-            return "그룹 이름과 영상 2개를 모두 업로드해주세요.", 400
+
+        if not group_name or len(files) < 1:
+            return "그룹 이름과 최소 1개 이상의 영상을 업로드해주세요.", 400
 
         group_id = "v_" + uuid.uuid4().hex
         date_str = datetime.now().strftime('%Y%m%d')
@@ -144,6 +148,7 @@ def upload():
             filename = f"video{idx + 1}.{ext}"
             tmp_path = Path(f"/tmp/temp_{filename}")
             file.save(tmp_path)
+
             s3_key = f"{s3_folder}/{filename}"
             s3.upload_file(
                 str(tmp_path), BUCKET_NAME, s3_key,
@@ -156,22 +161,27 @@ def upload():
         qr_url = create_branch_link(group_id, group_name)
         print("[QR] 최종 URL:", qr_url)
         create_qr_with_logo(qr_url, tmp_qr_path)
+
         s3.upload_file(tmp_qr_path, BUCKET_NAME, f"{s3_folder}/{qr_filename}",
                        ExtraArgs={'ACL': 'public-read'})
         os.remove(tmp_qr_path)
+
+        video1 = uploaded_files[0] if len(uploaded_files) > 0 else None
+        video2 = uploaded_files[1] if len(uploaded_files) > 1 else None
 
         db.collection("uploads").document(group_id).set({
             "group_id": group_id,
             "group_name": group_name,
             "s3_folder": s3_folder,
-            "video1": uploaded_files[0],
-            "video2": uploaded_files[1],
+            "video1": video1,
+            "video2": video2,
             "qr_filename": qr_filename,
             "qr_url": qr_url,
             "upload_date": date_str
         })
 
         qr_img_url = f"{WASABI_HOSTING_BASE}/{quote(s3_folder)}/{quote(qr_filename)}"
+
         return f"""
         <h3>✅ 업로드 완료</h3>
         <p>Group: {group_name} ({group_id})</p>
@@ -179,6 +189,7 @@ def upload():
         <img src='{qr_img_url}' width='200'><br>
         <a href='/'>다시 업로드하기</a>
         """
+
     return render_template('upload.html')
 
 # ==== QR 코드 생성 함수 ====
