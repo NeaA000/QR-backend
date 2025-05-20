@@ -1,17 +1,20 @@
 import os
-import csv
 import uuid
 import re
 from pathlib import Path
 from datetime import datetime
-from flask import Flask, request, render_template, redirect, url_for, session, abort
+from flask import (
+    Flask, request, render_template,
+    redirect, url_for, session, abort
+)
 import boto3
 from boto3.s3.transfer import TransferConfig
 import qrcode
 from PIL import Image
 import requests
+
 import firebase_admin
-from firebase_admin import credentials, auth
+from firebase_admin import credentials, firestore
 
 # ==== 환경변수 설정 ====
 ADMIN_PASSWORD   = os.environ.get('ADMIN_PASSWORD', 'changeme')
@@ -20,12 +23,11 @@ AWS_SECRET_KEY   = os.environ['AWS_SECRET_KEY']
 REGION_NAME      = os.environ['REGION_NAME']
 BUCKET_NAME      = os.environ['BUCKET_NAME']
 APP_BASE_URL     = os.environ.get('APP_BASE_URL', 'http://localhost:5000/watch/')
-UPLOAD_LOG       = os.environ.get('UPLOAD_LOG_PATH', 'upload_log.csv')
 BRANCH_KEY       = os.environ['BRANCH_KEY']
 BRANCH_API_URL   = 'https://api2.branch.io/v1/url'
 SECRET_KEY       = os.environ.get('FLASK_SECRET_KEY', 'supersecret')
 
-# ==== Firebase Admin 초기화 (생략 가능) ====
+# ==== Firebase Admin + Firestore 초기화 ====
 if not firebase_admin._apps:
     firebase_creds = {
         "type":                        os.environ["type"],
@@ -41,6 +43,8 @@ if not firebase_admin._apps:
     }
     cred = credentials.Certificate(firebase_creds)
     firebase_admin.initialize_app(cred)
+
+db = firestore.client()
 
 # ==== Flask 앱 설정 ====
 app = Flask(__name__)
@@ -72,7 +76,7 @@ def generate_presigned_url(key, expires_in=86400):
         ExpiresIn=expires_in
     )
 
-def create_branch_link(deep_url):
+def create_branch_link(deep_url, group_id):
     payload = {
         "branch_key": BRANCH_KEY,
         "campaign":   "lecture_upload",
@@ -81,6 +85,7 @@ def create_branch_link(deep_url):
             "$desktop_url": deep_url,
             "$ios_url":     deep_url,
             "$android_url": deep_url,
+            "$fallback_url": f"{APP_BASE_URL}{group_id}",
             "lecture_url":  deep_url
         }
     }
@@ -120,7 +125,6 @@ def login():
 def upload_form():
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
-    # 예시 대/소분류
     main_cats = ['기계','공구','장비']
     sub_map   = {
         '기계':['공작기계','제조기계','산업기계'],
@@ -134,7 +138,7 @@ def upload_video():
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
 
-    # — 1) 폼 데이터 수신 —
+    # 1) 폼 데이터 수신
     file          = request.files.get('file')
     group_name    = request.form.get('group_name','default')
     main_cat      = request.form.get('main_category','')
@@ -146,10 +150,11 @@ def upload_video():
     if not file:
         return "파일이 필요합니다.", 400
 
-    # — 2) Wasabi S3 업로드 —
+    # 2) 고유 group_id 생성 & S3 업로드
+    group_id  = uuid.uuid4().hex
     date_str  = datetime.now().strftime('%Y%m%d')
     safe_name = re.sub(r'[^\w]', '_', group_name)
-    folder    = f"videos/{safe_name}_{date_str}"
+    folder    = f"videos/{group_id}_{safe_name}_{date_str}"
     ext       = Path(file.filename).suffix or '.mp4'
     video_key = f"{folder}/video{ext}"
     tmp_path  = Path(f"./tmp{ext}")
@@ -157,34 +162,38 @@ def upload_video():
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
 
-    # — 3) presigned URL 생성 —
+    # 3) presigned URL
     presigned_url = generate_presigned_url(video_key)
 
-    # — 4) Branch 딥링크 생성 —
-    branch_url = create_branch_link(presigned_url)
+    # 4) Branch 딥링크
+    branch_url = create_branch_link(presigned_url, group_id)
 
-    # — 5) QR 코드 생성 & S3 업로드 —
+    # 5) QR 코드 & S3 업로드
     qr_filename = f"{uuid.uuid4().hex}.png"
     local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
     create_qr_with_logo(branch_url, local_qr)
     qr_key = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
-    # — 6) CSV 로그 기록 —
-    header = ['video_key','main_category','sub_category','time','level','tag',
-              'presigned_url','branch_url','qr_key','timestamp']
-    newfile = not os.path.exists(UPLOAD_LOG)
-    with open(UPLOAD_LOG, 'a', newline='', encoding='utf-8') as csvf:
-        w = csv.writer(csvf)
-        if newfile:
-            w.writerow(header)
-        w.writerow([
-            video_key, main_cat, sub_cat, lecture_time, lecture_level, lecture_tag,
-            presigned_url, branch_url, qr_key, date_str
-        ])
+    # 6) Firestore에 메타데이터 저장
+    db.collection('uploads').document(group_id).set({
+        'group_id':      group_id,
+        'group_name':    group_name,
+        'main_category': main_cat,
+        'sub_category':  sub_cat,
+        'time':          lecture_time,
+        'level':         lecture_level,
+        'tag':           lecture_tag,
+        'video_key':     video_key,
+        'presigned_url': presigned_url,
+        'branch_url':    branch_url,
+        'qr_key':        qr_key,
+        'upload_date':   date_str
+    })
 
-    # — 7) 업로드 성공 페이지 렌더링 —
+    # 7) 성공 페이지 렌더링
     return render_template('success.html',
+        group_id=group_id,
         main=main_cat, sub=sub_cat,
         time=lecture_time, level=lecture_level, tag=lecture_tag,
         presigned_url=presigned_url,
@@ -195,32 +204,16 @@ def upload_video():
 @app.route('/watch/<group_id>', methods=['GET'])
 def watch(group_id):
     """
-    1) upload_log.csv 에서 group_id 로 검색
-    2) presigned_url 을 가져와서 watch.html 로 렌더링
+    Firestore에서 presigned_url을 조회해 watch.html로 렌더
     """
-    if not os.path.exists(UPLOAD_LOG):
+    doc = db.collection('uploads').document(group_id).get()
+    if not doc.exists:
         abort(404)
-
-    presigned_url = None
-    with open(UPLOAD_LOG, newline='', encoding='utf-8') as csvf:
-        reader = csv.DictReader(csvf)
-        for row in reader:
-            if group_id in row['video_key']:
-                presigned_url = row['presigned_url']
-                break
-
-    if not presigned_url:
-        abort(404)
-
-    return render_template('watch.html', video_url=presigned_url)
+    data = doc.to_dict()
+    return render_template('watch.html', video_url=data['presigned_url'])
 
 # ==== 서버 실행 ====
 if __name__ == '__main__':
-    # static 폴더(UPLOAD_FOLDER) 생성
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
-    # Railway 등에서 주입하는 PORT 환경변수 사용, 없으면 기본 5000
     port = int(os.environ.get('PORT', 5000))
-    
-    # 0.0.0.0으로 바인딩해야 외부(퍼블릭)에서 접근 가능
     app.run(host='0.0.0.0', port=port, debug=True)
