@@ -4,7 +4,7 @@ import uuid
 import re
 from pathlib import Path
 from datetime import datetime
-from flask import Flask, request, render_template, redirect, url_for, session, jsonify
+from flask import Flask, request, render_template, redirect, url_for, session, abort
 import boto3
 from boto3.s3.transfer import TransferConfig
 import qrcode
@@ -191,6 +191,28 @@ def upload_video():
         branch_url=branch_url,
         qr_url=url_for('static', filename=qr_filename)
     )
+
+@app.route('/watch/<group_id>', methods=['GET'])
+def watch(group_id):
+    """
+    1) upload_log.csv 에서 group_id 로 검색
+    2) presigned_url 을 가져와서 watch.html 로 렌더링
+    """
+    if not os.path.exists(UPLOAD_LOG):
+        abort(404)
+
+    presigned_url = None
+    with open(UPLOAD_LOG, newline='', encoding='utf-8') as csvf:
+        reader = csv.DictReader(csvf)
+        for row in reader:
+            if group_id in row['video_key']:
+                presigned_url = row['presigned_url']
+                break
+
+    if not presigned_url:
+        abort(404)
+
+    return render_template('watch.html', video_url=presigned_url)
 
 # ==== 서버 실행 ====
 if __name__ == '__main__':
