@@ -1,0 +1,30 @@
+<!-- templates/success.html -->
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>업로드 성공</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; }
+    h2   { color: #2a9d8f; }
+    p, a { margin: 8px 0; display: block; }
+  </style>
+</head>
+<body>
+  <h2>✅ 업로드 성공</h2>
+  <p><strong>대분류:</strong> {{ main }} / <strong>소분류:</strong> {{ sub }}</p>
+  <p><strong>시간:</strong> {{ time }} / <strong>레벨:</strong> {{ level }} / <strong>태그:</strong> {{ tag }}</p>
+
+  <p>
+    <a href="{{ presigned_url }}" target="_blank">▶ 영상 바로 보기</a>
+    <a href="{{ branch_url }}"    target="_blank">▶ 딥링크 열기</a>
+  </p>
+
+  <div>
+    <img src="{{ qr_url }}" width="200" alt="QR 코드" />
+  </div>
+
+  <p><a href="/upload_form">▶ 다시 업로드 페이지로 돌아가기</a></p>
+</body>
+</html>

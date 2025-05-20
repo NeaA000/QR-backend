@@ -1,4 +1,5 @@
-flask
+Flask>=2.0
+Jinja2>=2.9
 boto3
 firebase-admin
 qrcode
