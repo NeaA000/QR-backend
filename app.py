@@ -194,5 +194,11 @@ def upload_video():
 
 # ==== 서버 실행 ====
 if __name__ == '__main__':
+    # static 폴더(UPLOAD_FOLDER) 생성
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-    app.run(debug=True)
+
+    # Railway 등에서 주입하는 PORT 환경변수 사용, 없으면 기본 5000
+    port = int(os.environ.get('PORT', 5000))
+    
+    # 0.0.0.0으로 바인딩해야 외부(퍼블릭)에서 접근 가능
+    app.run(host='0.0.0.0', port=port, debug=True)
