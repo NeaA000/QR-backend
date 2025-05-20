@@ -4,27 +4,28 @@ import uuid
 import re
 from pathlib import Path
 from datetime import datetime
-from flask import Flask, request, render_template, jsonify
+from flask import Flask, request, render_template, redirect, url_for, session, jsonify
 import boto3
 from boto3.s3.transfer import TransferConfig
 import qrcode
 from PIL import Image
-
+import requests
 import firebase_admin
 from firebase_admin import credentials, auth
-import requests
 
 # ==== 환경변수 설정 ====
-AWS_ACCESS_KEY    = os.environ.get('AWS_ACCESS_KEY')
-AWS_SECRET_KEY    = os.environ.get('AWS_SECRET_KEY')
-REGION_NAME       = os.environ.get('REGION_NAME')
-BUCKET_NAME       = os.environ.get('BUCKET_NAME')
-APP_BASE_URL      = os.environ.get('APP_BASE_URL', 'http://localhost:5000/watch/')
-UPLOAD_LOG        = os.environ.get('UPLOAD_LOG_PATH', 'upload_log.csv')
-BRANCH_KEY        = os.environ.get('BRANCH_KEY')
-BRANCH_API_URL    = 'https://api2.branch.io/v1/url'
+ADMIN_PASSWORD   = os.environ.get('ADMIN_PASSWORD', 'changeme')
+AWS_ACCESS_KEY   = os.environ['AWS_ACCESS_KEY']
+AWS_SECRET_KEY   = os.environ['AWS_SECRET_KEY']
+REGION_NAME      = os.environ['REGION_NAME']
+BUCKET_NAME      = os.environ['BUCKET_NAME']
+APP_BASE_URL     = os.environ.get('APP_BASE_URL', 'http://localhost:5000/watch/')
+UPLOAD_LOG       = os.environ.get('UPLOAD_LOG_PATH', 'upload_log.csv')
+BRANCH_KEY       = os.environ['BRANCH_KEY']
+BRANCH_API_URL   = 'https://api2.branch.io/v1/url'
+SECRET_KEY       = os.environ.get('FLASK_SECRET_KEY', 'supersecret')
 
-# ==== Firebase Admin 초기화 ====
+# ==== Firebase Admin 초기화 (생략 가능) ====
 if not firebase_admin._apps:
     firebase_creds = {
         "type":                        os.environ["type"],
@@ -43,7 +44,8 @@ if not firebase_admin._apps:
 
 # ==== Flask 앱 설정 ====
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER']      = 'static'
+app.secret_key                  = SECRET_KEY
+app.config['UPLOAD_FOLDER']     = 'static'
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB
 
 # ==== Wasabi S3 클라이언트 ====
@@ -64,7 +66,6 @@ config = TransferConfig(
 # —– 유틸리티 함수들 —–
 
 def generate_presigned_url(key, expires_in=86400):
-    """S3 객체 presigned GET URL 생성"""
     return s3.generate_presigned_url(
         ClientMethod='get_object',
         Params={'Bucket': BUCKET_NAME, 'Key': key},
@@ -72,7 +73,6 @@ def generate_presigned_url(key, expires_in=86400):
     )
 
 def create_branch_link(deep_url):
-    """Branch.io API 호출하여 딥링크 생성"""
     payload = {
         "branch_key": BRANCH_KEY,
         "campaign":   "lecture_upload",
@@ -89,7 +89,6 @@ def create_branch_link(deep_url):
     return res.json().get('url')
 
 def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size_ratio=0.25):
-    """QR 코드 생성 후 중앙에 로고 삽입"""
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
     qr.add_data(link_url)
     qr.make(fit=True)
@@ -103,31 +102,51 @@ def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size
         qr_img.paste(logo, pos, mask=(logo if logo.mode=='RGBA' else None))
     qr_img.save(output_path)
 
-# —– 업로드 라우트 —–
+# ==== 라우팅 ====
+
+@app.route('/', methods=['GET'])
+def login_page():
+    return render_template('login.html')
+
+@app.route('/login', methods=['POST'])
+def login():
+    pw = request.form.get('password','')
+    if pw == ADMIN_PASSWORD:
+        session['logged_in'] = True
+        return redirect(url_for('upload_form'))
+    return render_template('login.html', error="비밀번호가 올바르지 않습니다.")
+
+@app.route('/upload_form', methods=['GET'])
+def upload_form():
+    if not session.get('logged_in'):
+        return redirect(url_for('login_page'))
+    # 예시 대/소분류
+    main_cats = ['기계','공구','장비']
+    sub_map   = {
+        '기계':['공작기계','제조기계','산업기계'],
+        '공구':['수공구','전동공구','절삭공구'],
+        '장비':['안전장비','운송장비','작업장비']
+    }
+    return render_template('upload_form.html', mains=main_cats, subs=sub_map)
+
 @app.route('/upload', methods=['POST'])
 def upload_video():
-    """
-    1) file + group_name + main_category + sub_category + time + level + tag 수신
-    2) Wasabi S3 업로드
-    3) presigned URL 생성
-    4) Branch 딥링크 생성
-    5) QR 코드 생성 및 S3 업로드
-    6) CSV 로그 기록
-    7) JSON 응답 반환
-    """
-    # 폼 필드
+    if not session.get('logged_in'):
+        return redirect(url_for('login_page'))
+
+    # — 1) 폼 데이터 수신 —
     file          = request.files.get('file')
-    group_name    = request.form.get('group_name', 'default')
-    main_cat      = request.form.get('main_category', '')
-    sub_cat       = request.form.get('sub_category', '')
-    lecture_time  = request.form.get('time', '')
-    lecture_level = request.form.get('level', '')
-    lecture_tag   = request.form.get('tag', '')
+    group_name    = request.form.get('group_name','default')
+    main_cat      = request.form.get('main_category','')
+    sub_cat       = request.form.get('sub_category','')
+    lecture_time  = request.form.get('time','')
+    lecture_level = request.form.get('level','')
+    lecture_tag   = request.form.get('tag','')
 
     if not file:
-        return jsonify({"error": "file is required"}), 400
+        return "파일이 필요합니다.", 400
 
-    # S3 업로드
+    # — 2) Wasabi S3 업로드 —
     date_str  = datetime.now().strftime('%Y%m%d')
     safe_name = re.sub(r'[^\w]', '_', group_name)
     folder    = f"videos/{safe_name}_{date_str}"
@@ -138,20 +157,20 @@ def upload_video():
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
 
-    # presigned URL
+    # — 3) presigned URL 생성 —
     presigned_url = generate_presigned_url(video_key)
 
-    # Branch 딥링크
+    # — 4) Branch 딥링크 생성 —
     branch_url = create_branch_link(presigned_url)
 
-    # QR 코드 & 업로드
+    # — 5) QR 코드 생성 & S3 업로드 —
     qr_filename = f"{uuid.uuid4().hex}.png"
     local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
     create_qr_with_logo(branch_url, local_qr)
     qr_key = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
-    # CSV 로그
+    # — 6) CSV 로그 기록 —
     header = ['video_key','main_category','sub_category','time','level','tag',
               'presigned_url','branch_url','qr_key','timestamp']
     newfile = not os.path.exists(UPLOAD_LOG)
@@ -164,18 +183,14 @@ def upload_video():
             presigned_url, branch_url, qr_key, date_str
         ])
 
-    # JSON 응답
-    return jsonify({
-        "video_key":     video_key,
-        "main_category": main_cat,
-        "sub_category":  sub_cat,
-        "time":          lecture_time,
-        "level":         lecture_level,
-        "tag":           lecture_tag,
-        "presigned_url": presigned_url,
-        "branch_url":    branch_url,
-        "qr_key":        qr_key,
-    }), 200
+    # — 7) 업로드 성공 페이지 렌더링 —
+    return render_template('success.html',
+        main=main_cat, sub=sub_cat,
+        time=lecture_time, level=lecture_level, tag=lecture_tag,
+        presigned_url=presigned_url,
+        branch_url=branch_url,
+        qr_url=url_for('static', filename=qr_filename)
+    )
 
 # ==== 서버 실행 ====
 if __name__ == '__main__':
