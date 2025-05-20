@@ -16,177 +16,208 @@ from firebase_admin import credentials, auth
 import requests
 import json
 
-# ==== 사용자 설정 ====
-AWS_ACCESS_KEY = os.environ.get('AWS_ACCESS_KEY')
-AWS_SECRET_KEY = os.environ.get('AWS_SECRET_KEY')
-REGION_NAME = os.environ.get('REGION_NAME')
-BUCKET_NAME = os.environ.get('BUCKET_NAME')
-APP_BASE_URL = os.environ.get('APP_BASE_URL', 'http://localhost:5000/watch/')
-UPLOAD_LOG = 'upload_log.csv'
+# ==== 사용자 설정 (환경변수로 관리) ====
+AWS_ACCESS_KEY    = os.environ.get('AWS_ACCESS_KEY')
+AWS_SECRET_KEY    = os.environ.get('AWS_SECRET_KEY')
+REGION_NAME       = os.environ.get('REGION_NAME')
+BUCKET_NAME       = os.environ.get('BUCKET_NAME')
+APP_BASE_URL      = os.environ.get('APP_BASE_URL', 'http://localhost:5000/watch/')
+UPLOAD_LOG        = 'upload_log.csv'
+
+# ==== Branch.io 설정 ====
+BRANCH_KEY        = os.environ.get('BRANCH_KEY')
+BRANCH_API_URL    = 'https://api2.branch.io/v1/url'
 
 # ==== Firebase Admin 초기화 (Railway 환경변수 기반) ====
 if not firebase_admin._apps:
     firebase_creds = {
-        "type": os.environ["type"],
-        "project_id": os.environ["project_id"],
-        "private_key_id": os.environ["private_key_id"],
-        "private_key": os.environ["private_key"].replace('\\n', '\n'),
-        "client_email": os.environ["client_email"],
-        "client_id": os.environ["client_id"],
-        "auth_uri": os.environ["auth_uri"],
-        "token_uri": os.environ["token_uri"],
+        "type":                        os.environ["type"],
+        "project_id":                  os.environ["project_id"],
+        "private_key_id":              os.environ["private_key_id"],
+        "private_key":                 os.environ["private_key"].replace('\\n', '\n'),
+        "client_email":                os.environ["client_email"],
+        "client_id":                   os.environ["client_id"],
+        "auth_uri":                    os.environ["auth_uri"],
+        "token_uri":                   os.environ["token_uri"],
         "auth_provider_x509_cert_url": os.environ["auth_provider_x509_cert_url"],
-        "client_x509_cert_url": os.environ["client_x509_cert_url"]
+        "client_x509_cert_url":        os.environ["client_x509_cert_url"]
     }
     cred = credentials.Certificate(firebase_creds)
     firebase_admin.initialize_app(cred)
 
 # ==== Flask 앱 설정 ====
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'static'
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024
+app.config['UPLOAD_FOLDER']       = 'static'
+app.config['MAX_CONTENT_LENGTH']  = 2 * 1024 * 1024 * 1024  # 2GB limit
 
 # ==== Wasabi S3 클라이언트 설정 ====
 s3 = boto3.client(
     's3',
-    aws_access_key_id=AWS_ACCESS_KEY,
-    aws_secret_access_key=AWS_SECRET_KEY,
-    region_name=REGION_NAME,
-    endpoint_url=f'https://s3.{REGION_NAME}.wasabisys.com'
+    aws_access_key_id     = AWS_ACCESS_KEY,
+    aws_secret_access_key = AWS_SECRET_KEY,
+    region_name           = REGION_NAME,
+    endpoint_url          = f'https://s3.{REGION_NAME}.wasabisys.com'
 )
-
 config = TransferConfig(
-    multipart_threshold=1024 * 1024 * 25,
-    multipart_chunksize=1024 * 1024 * 50,
-    max_concurrency=5,
-    use_threads=True
+    multipart_threshold = 1024 * 1024 * 25,
+    multipart_chunksize = 1024 * 1024 * 50,
+    max_concurrency     = 5,
+    use_threads         = True
 )
 
-# ==== QR 코드 생성 함수 ====
-def create_qr_with_logo(url, output_path, logo_path='static/logo.png', size_ratio=0.25):
+# ==== 1) pre-signed URL 생성 함수 ====
+def generate_presigned_url(key, expires_in=3600*24):
+    """
+    S3 객체에 대한 pre-signed GET URL을 만듭니다.
+    expires_in 초 후 만료됩니다.
+    """
+    return s3.generate_presigned_url(
+        ClientMethod='get_object',
+        Params={'Bucket': BUCKET_NAME, 'Key': key},
+        ExpiresIn=expires_in
+    )
+
+# ==== 2) Branch 딥링크 생성 함수 ====
+def create_branch_link(deep_url):
+    """
+    Branch.io API를 호출하여 deep_url을 래핑한 딥링크를 생성합니다.
+    """
+    payload = {
+        "branch_key": BRANCH_KEY,
+        "campaign": "lecture_upload",
+        "channel": "flask_server",
+        "data": {
+            "$desktop_url": deep_url,
+            "$ios_url":     deep_url,
+            "$android_url": deep_url,
+            "lecture_url": deep_url
+        }
+    }
+    res = requests.post(BRANCH_API_URL, json=payload)
+    res.raise_for_status()
+    return res.json().get('url')
+
+# ==== 3) QR 코드 생성 (로고 포함) ====
+def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size_ratio=0.25):
+    """
+    link_url을 포함한 QR 코드를 만들고, 중앙에 logo를 삽입합니다.
+    """
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
-    qr.add_data(url)
+    qr.add_data(link_url)
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
 
+    # 가운데 로고 삽입 (선택 사항)
     if os.path.exists(logo_path):
         try:
             logo = Image.open(logo_path)
-            qr_width, qr_height = qr_img.size
-            logo_size = int(qr_width * size_ratio)
+            qr_w, qr_h = qr_img.size
+            logo_size = int(qr_w * size_ratio)
             logo = logo.resize((logo_size, logo_size), Image.LANCZOS)
-            pos = ((qr_width - logo_size) // 2, (qr_height - logo_size) // 2)
-            qr_img.paste(logo, pos, mask=logo if logo.mode == 'RGBA' else None)
+            pos = ((qr_w - logo_size)//2, (qr_h - logo_size)//2)
+            qr_img.paste(logo, pos, mask=logo if logo.mode=='RGBA' else None)
         except Exception as e:
-            print(f"⚠️ 로고 이미지를 불러올 수 없습니다: {e}")
+            print(f"⚠️ QR 로고 삽입 실패: {e}")
 
     qr_img.save(output_path)
 
-# ==== 업로드 라우트 ====
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    if request.method == 'POST':
-        group_name = request.form.get('group_name')
-        file = request.files.get('file')
+# ==== 메인 업로드 라우트 (/upload) ====
+@app.route('/upload', methods=['POST'])
+def upload_video():
+    """
+    1) 업로드된 비디오를 Wasabi S3에 저장
+    2) pre-signed URL 생성
+    3) Branch 딥링크 생성
+    4) QR 코드 생성 및 S3에 업로드
+    5) 로그(CSV)에 기록 후 JSON 응답
+    """
+    file      = request.files.get('file')
+    group_name= request.form.get('group_name', 'default')
 
-        if not group_name or not file:
-            return "그룹 이름과 영상을 모두 업로드해주세요.", 400
+    if not file:
+        return jsonify({"error": "file is required"}), 400
 
-        group_id = uuid.uuid4().hex
-        date_str = datetime.now().strftime('%Y%m%d')
-        safe_group_name = re.sub(r'[^\w가-힣]', '_', group_name)
-        qr_filename = f"{safe_group_name}_{date_str}.png"
-        local_qr_path = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
-        qr_url = f"{APP_BASE_URL}{group_id}"
-        s3_folder = f"groups/{group_name}_{date_str}"
+    # a) S3에 업로드
+    date_str     = datetime.now().strftime('%Y%m%d')
+    safe_name    = re.sub(r'[^\w]', '_', group_name)
+    folder       = f"videos/{safe_name}_{date_str}"
+    ext          = Path(file.filename).suffix or '.mp4'
+    video_key    = f"{folder}/video{ext}"
+    temp_path    = Path(f"./tmp{ext}")
+    file.save(temp_path)
+    s3.upload_file(str(temp_path), BUCKET_NAME, video_key,
+                   Config=config)
+    temp_path.unlink(missing_ok=True)
 
-        ext = file.filename.split('.')[-1]
-        filename = f"video.{ext}"
-        temp_path = Path(f"./temp_{filename}")
-        file.save(temp_path)
+    # b) presigned URL
+    presigned_url = generate_presigned_url(video_key)
 
-        s3_key = f"{s3_folder}/{filename}"
-        s3.upload_file(
-            str(temp_path), BUCKET_NAME, s3_key,
-            ExtraArgs={'ACL': 'public-read'},
-            Config=config
-        )
+    # c) Branch 딥링크
+    branch_url    = create_branch_link(presigned_url)
 
-        try:
-            temp_path.unlink()
-        except PermissionError:
-            print(f"⚠️ 파일 삭제 실패: {temp_path.name}")
+    # d) QR 코드 생성 & S3 업로드
+    qr_filename = f"{uuid.uuid4().hex}.png"
+    local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
+    create_qr_with_logo(branch_url, local_qr)
 
-        create_qr_with_logo(qr_url, local_qr_path)
+    qr_key = f"{folder}/{qr_filename}"
+    s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
-        s3_qr_key = f"{s3_folder}/{qr_filename}"
-        s3.upload_file(
-            local_qr_path, BUCKET_NAME, s3_qr_key,
-            ExtraArgs={'ACL': 'public-read'}
-        )
+    # e) CSV 로그 기록
+    new_log = not os.path.exists(UPLOAD_LOG)
+    with open(UPLOAD_LOG, 'a', newline='', encoding='utf-8') as csvf:
+        writer = csv.writer(csvf)
+        if new_log:
+            writer.writerow(['video_key','presigned_url','branch_url','qr_key','timestamp'])
+        writer.writerow([video_key, presigned_url, branch_url, qr_key, date_str])
 
-        csv_exists = os.path.exists(UPLOAD_LOG)
-        with open(UPLOAD_LOG, 'a', newline='', encoding='utf-8') as csvfile:
-            writer = csv.writer(csvfile)
-            if not csv_exists:
-                writer.writerow(['group_id', 'group_name', 's3_folder', 'video', 'qr_filename', 'qr_url', 'upload_date'])
-            writer.writerow([
-                group_id, group_name, s3_folder,
-                filename,
-                qr_filename, qr_url, date_str
-            ])
+    # f) 최종 JSON 반환
+    return jsonify({
+        "video_key":     video_key,
+        "presigned_url": presigned_url,
+        "branch_url":    branch_url,
+        "qr_key":        qr_key,
+    }), 200
 
-        return f"""
-        <h3>✅ 업로드 완료</h3>
-        <p>Group: {group_name} ({group_id})</p>
-        <p><a href='{qr_url}' target='_blank'>{qr_url}</a></p>
-        <img src='/static/{qr_filename}' width='200'><br>
-        <a href='/'>다시 업로드하기</a>
-        """
-
-    return render_template('index.html')
-
-# ==== 그룹 정보 API ====
+# ==== 그룹 정보 조회 API (/api/group/<id>) ====
 @app.route('/api/group/<group_id>')
 def get_group_info(group_id):
+    """
+    upload_log.csv에서 group_id가 포함된 레코드를 찾아
+    presigned_url과 branch_url을 반환합니다.
+    """
     if not os.path.exists(UPLOAD_LOG):
-        return jsonify({"error": "no log"}), 404
+        return jsonify({"error":"log missing"}), 404
 
-    with open(UPLOAD_LOG, newline='', encoding='utf-8') as csvfile:
-        reader = csv.DictReader(csvfile)
-        for row in reader:
-            if row['group_id'] == group_id:
+    with open(UPLOAD_LOG, newline='', encoding='utf-8') as csvf:
+        for row in csv.DictReader(csvf):
+            if group_id in row['video_key']:
                 return jsonify({
-                    "group_id": row['group_id'],
-                    "group_name": row['group_name'],
-                    "video": f"https://s3.{REGION_NAME}.wasabisys.com/{BUCKET_NAME}/{row['s3_folder']}/{row['video']}"
+                    "presigned_url": row['presigned_url'],
+                    "branch_url":    row['branch_url']
                 })
+    return jsonify({"error":"not found"}), 404
 
-    return jsonify({"error": "not found"}), 404
-
-# ==== Firebase Custom Token 발급 API ====
+# ==== Firebase Custom Token API (/verifyNaver) ====
 @app.route('/verifyNaver', methods=['POST'])
 def verify_naver():
     access_token = request.form.get("accessToken")
     if not access_token:
-        return jsonify({"error": "accessToken required"}), 400
+        return jsonify({"error":"accessToken required"}), 400
 
-    headers = {"Authorization": f"Bearer {access_token}"}
-    res = requests.get("https://openapi.naver.com/v1/nid/me", headers=headers)
-
+    # Naver 프로필 조회
+    res = requests.get("https://openapi.naver.com/v1/nid/me",
+                       headers={"Authorization":f"Bearer {access_token}"})
     if res.status_code != 200:
-        return jsonify({"error": "invalid access token"}), 400
+        return jsonify({"error":"invalid token"}), 400
 
-    user_info = res.json().get("response")
-    naver_id = user_info.get("id")
-    uid = f"naver:{naver_id}"
-
-    try:
-        custom_token = auth.create_custom_token(uid)
-        return jsonify({"firebase_token": custom_token.decode('utf-8')})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    naver_id = res.json().get("response", {}).get("id")
+    uid      = f"naver:{naver_id}"
+    custom_token = auth.create_custom_token(uid).decode('utf-8')
+    return jsonify({"firebase_token": custom_token})
 
 # ==== 서버 실행 ====
 if __name__ == '__main__':
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     app.run(debug=True)
+
