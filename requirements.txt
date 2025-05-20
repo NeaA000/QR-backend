@@ -1,4 +1,6 @@
 flask
 boto3
+firebase-admin
 qrcode
-pillow
+Pillow
+requests
