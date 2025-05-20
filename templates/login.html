@@ -1,15 +1,7 @@
-<!DOCTYPE html>
-<html>
-<head>
-  <title>QR 영상 업로더</title>
-</head>
-<body>
-  <h2>🎞️ QR 코드 기반 영상 업로드</h2>
-  <form method="POST" enctype="multipart/form-data">
-    <label>그룹 이름: <input type="text" name="group_name" required></label><br><br>
-    <label>영상 파일 1: <input type="file" name="files" required></label><br><br>
-    <label>영상 파일 2: <input type="file" name="files" required></label><br><br>
-    <button type="submit">업로드 및 QR 생성</button>
-  </form>
-</body>
-</html>
+<!doctype html>
+<form method="post" action="/login">
+  <h2>관리자 로그인</h2>
+  {% if error %}<p style="color:red">{{ error }}</p>{% endif %}
+  비밀번호: <input type="password" name="password" />
+  <button type="submit">로그인</button>
+</form>

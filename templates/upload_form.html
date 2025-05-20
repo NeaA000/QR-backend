@@ -1,0 +1,65 @@
+<!-- templates/upload_form.html -->
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>강의 업로드 폼</title>
+</head>
+<body>
+  <h2>강의 업로드 폼</h2>
+  <form method="post" action="/upload" enctype="multipart/form-data">
+    그룹 이름: <input name="group_name" required /><br/>
+    
+    대분류:
+    <select name="main_category" id="main_cat" required>
+      <option value="">선택</option>
+      {% for m in mains %}
+        <option value="{{ m }}">{{ m }}</option>
+      {% endfor %}
+    </select><br/>
+    
+    소분류:
+    <select name="sub_category" id="sub_cat" required>
+      <option value="">선택</option>
+    </select><br/>
+    
+    시간: <input name="time" placeholder="예: 30분" required /><br/>
+    레벨: <input name="level" placeholder="예: 초급" required /><br/>
+    태그: <input name="tag" placeholder="예: 자격증 포함" /><br/>
+    파일: <input type="file" name="file" accept="video/*" required /><br/>
+    <button type="submit">업로드</button>
+  </form>
+
+  <!-- JSON 문자열을 data attribute 에 넣는다 -->
+  <script id="subs-data" type="application/json">
+    {{ subs | tojson }}
+  </script>
+
+  <script>
+    // 1) 먼저 DOM에서 JSON 문자열을 추출
+    const subsJson = document.getElementById('subs-data').textContent.trim();
+    // 2) JS 객체로 파싱
+    let subs = {};
+    try {
+      subs = JSON.parse(subsJson);
+    } catch (e) {
+      console.error("⚠️ subs JSON 파싱 오류:", e, subsJson);
+    }
+
+    // 이제 대분류 선택 시 소분류를 채워주는 함수
+    document.getElementById('main_cat').addEventListener('change', syncSub);
+
+    function syncSub() {
+      const main = this.value;
+      const sel  = document.getElementById('sub_cat');
+      sel.innerHTML = '<option value="">선택</option>';
+      (subs[main] || []).forEach(s => {
+        sel.innerHTML += `<option value="${s}">${s}</option>`;
+      });
+    }
+
+    // 디버그: subs 내용 확인
+    console.log("subs mapping:", subs);
+  </script>
+</body>
+</html>
