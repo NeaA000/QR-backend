@@ -49,7 +49,7 @@ db = firestore.client()
 
 # ==== Flask 앱 설정 ====
 app = Flask(__name__)
-app.secret_key                  = SECRET_KEY
+app.secret_key                   = SECRET_KEY
 app.config['UPLOAD_FOLDER']     = 'static'
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB
 
@@ -107,7 +107,6 @@ def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size
         qr_img.paste(logo, pos, mask=(logo if logo.mode=='RGBA' else None))
     qr_img.save(output_path)
 
-# ==== Presigned URL 유효성 검사 ====
 def is_presigned_url_expired(url, safety_margin_minutes=60):
     try:
         parsed = urlparse(url)
@@ -196,11 +195,10 @@ def upload_video():
     presigned_url = generate_presigned_url(video_key, expires_in=604800)
     branch_url = create_branch_link(presigned_url, group_id)
 
-    # QR에는 /watch/<group_id> 고정 링크를 사용
-    fixed_watch_url = f"{APP_BASE_URL}{group_id}"
+    # QR에는 branch_url을 사용 → 앱 또는 웹 fallback 대응
     qr_filename = f"{uuid.uuid4().hex}.png"
     local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
-    create_qr_with_logo(fixed_watch_url, local_qr)
+    create_qr_with_logo(branch_url, local_qr)
     qr_key = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
