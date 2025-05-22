@@ -2,7 +2,7 @@ import os
 import uuid
 import re
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import (
     Flask, request, render_template,
     redirect, url_for, session, abort
@@ -12,6 +12,7 @@ from boto3.s3.transfer import TransferConfig
 import qrcode
 from PIL import Image
 import requests
+from urllib.parse import urlparse, parse_qs
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -67,8 +68,7 @@ config = TransferConfig(
     use_threads         = True
 )
 
-# —– 유틸리티 함수들 —–
-
+# ==== 유틸리티 함수들 ====
 def generate_presigned_url(key, expires_in=86400):
     return s3.generate_presigned_url(
         ClientMethod='get_object',
@@ -107,8 +107,28 @@ def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size
         qr_img.paste(logo, pos, mask=(logo if logo.mode=='RGBA' else None))
     qr_img.save(output_path)
 
-# ==== 라우팅 ====
+# ==== Presigned URL 유효성 검사 ====
+def is_presigned_url_expired(url, safety_margin_minutes=60):
+    try:
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
 
+        if 'X-Amz-Date' not in query or 'X-Amz-Expires' not in query:
+            return True
+
+        issued_str = query['X-Amz-Date'][0]
+        expires_in = int(query['X-Amz-Expires'][0])
+
+        issued_time = datetime.strptime(issued_str, '%Y%m%dT%H%M%SZ')
+        expiry_time = issued_time + timedelta(seconds=expires_in)
+        margin_time = datetime.utcnow() + timedelta(minutes=safety_margin_minutes)
+
+        return margin_time >= expiry_time
+    except Exception as e:
+        print(f"URL 검사 중 오류: {e}")
+        return True
+
+# ==== 라우팅 ====
 @app.route('/', methods=['GET'])
 def login_page():
     return render_template('login.html')
@@ -126,17 +146,12 @@ def upload_form():
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
 
-    # 대분류 리스트
     main_cats = ['기계','공구','장비']
-
-    # 대분류 → 중분류 매핑
     sub_map   = {
         '기계': ['공작기계','제조기계','산업기계'],
         '공구': ['수공구','전동공구','절삭공구'],
         '장비': ['안전장비','운송장비','작업장비']
     }
-
-    # 중분류 → 소분류 매핑
     leaf_map = {
         '공작기계': ['불도저','크레인','굴착기'],
         '제조기계': ['사출 성형기','프레스기','열성형기'],
@@ -148,24 +163,18 @@ def upload_form():
         '운송장비': ['리프트 장비','체인 블록','호이스트'],
         '작업장비': ['스캐폴딩','작업대','리프트 테이블']
     }
-
-    return render_template('upload_form.html',
-        mains=main_cats,
-        subs=sub_map,
-        leafs=leaf_map
-    )
+    return render_template('upload_form.html', mains=main_cats, subs=sub_map, leafs=leaf_map)
 
 @app.route('/upload', methods=['POST'])
 def upload_video():
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
 
-    # 1) 폼 데이터 수신
     file          = request.files.get('file')
     group_name    = request.form.get('group_name','default')
     main_cat      = request.form.get('main_category','')
     sub_cat       = request.form.get('sub_category','')
-    leaf_cat      = request.form.get('sub_sub_category','')  # 추가
+    leaf_cat      = request.form.get('sub_sub_category','')
     lecture_time  = request.form.get('time','')
     lecture_level = request.form.get('level','')
     lecture_tag   = request.form.get('tag','')
@@ -173,7 +182,6 @@ def upload_video():
     if not file:
         return "파일이 필요합니다.", 400
 
-    # 2) 고유 group_id 생성 & S3 업로드
     group_id  = uuid.uuid4().hex
     date_str  = datetime.now().strftime('%Y%m%d')
     safe_name = re.sub(r'[^\w]', '_', group_name)
@@ -185,20 +193,15 @@ def upload_video():
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
 
-    # 3) presigned URL
-    presigned_url = generate_presigned_url(video_key)
-
-    # 4) Branch 딥링크
+    presigned_url = generate_presigned_url(video_key, expires_in=604800)
     branch_url = create_branch_link(presigned_url, group_id)
 
-    # 5) QR 코드 & S3 업로드
     qr_filename = f"{uuid.uuid4().hex}.png"
     local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
     create_qr_with_logo(branch_url, local_qr)
     qr_key = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
-    # 6) Firestore에 메타데이터 저장
     db.collection('uploads').document(group_id).set({
         'group_id':        group_id,
         'group_name':      group_name,
@@ -211,27 +214,38 @@ def upload_video():
         'video_key':       video_key,
         'presigned_url':   presigned_url,
         'branch_url':      branch_url,
+        'branch_updated_at': datetime.utcnow().isoformat(),
         'qr_key':          qr_key,
         'upload_date':     date_str
     })
 
-    # 7) 성공 페이지 렌더링
-    return render_template('success.html',
-        group_id=group_id,
-        main=main_cat, sub=sub_cat, leaf=leaf_cat,
-        time=lecture_time, level=lecture_level, tag=lecture_tag,
-        presigned_url=presigned_url,
-        branch_url=branch_url,
-        qr_url=url_for('static', filename=qr_filename)
-    )
+    return render_template('success.html', group_id=group_id, main=main_cat, sub=sub_cat, leaf=leaf_cat, time=lecture_time, level=lecture_level, tag=lecture_tag, presigned_url=presigned_url, branch_url=branch_url, qr_url=url_for('static', filename=qr_filename))
 
 @app.route('/watch/<group_id>', methods=['GET'])
 def watch(group_id):
-    doc = db.collection('uploads').document(group_id).get()
+    doc_ref = db.collection('uploads').document(group_id)
+    doc = doc_ref.get()
     if not doc.exists:
         abort(404)
     data = doc.to_dict()
-    return render_template('watch.html', video_url=data['presigned_url'])
+
+    current_presigned = data.get('presigned_url', '')
+    current_branch_url = data.get('branch_url', '')
+    should_renew = not current_presigned or is_presigned_url_expired(current_presigned, 60)
+
+    if should_renew:
+        new_presigned_url = generate_presigned_url(data['video_key'], expires_in=604800)
+        new_branch_url = create_branch_link(new_presigned_url, group_id)
+        doc_ref.update({
+            'presigned_url': new_presigned_url,
+            'branch_url': new_branch_url,
+            'branch_updated_at': datetime.utcnow().isoformat()
+        })
+        video_url = new_presigned_url
+    else:
+        video_url = current_presigned
+
+    return render_template('watch.html', video_url=video_url)
 
 # ==== 서버 실행 ====
 if __name__ == '__main__':
