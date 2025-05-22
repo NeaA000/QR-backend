@@ -1,4 +1,3 @@
-<!-- templates/upload_form.html -->
 <!doctype html>
 <html lang="ko">
 <head>
@@ -9,7 +8,8 @@
   <h2>강의 업로드 폼</h2>
   <form method="post" action="/upload" enctype="multipart/form-data">
     그룹 이름: <input name="group_name" required /><br/>
-    
+
+    <!-- 대분류 -->
     대분류:
     <select name="main_category" id="main_cat" required>
       <option value="">선택</option>
@@ -17,12 +17,19 @@
         <option value="{{ m }}">{{ m }}</option>
       {% endfor %}
     </select><br/>
-    
-    소분류:
+
+    <!-- 중분류 -->
+    중분류:
     <select name="sub_category" id="sub_cat" required>
-      <option value="">선택</option>
+      <option value="">먼저 대분류 선택</option>
     </select><br/>
-    
+
+    <!-- 소분류 -->
+    소분류:
+    <select name="sub_sub_category" id="leaf_cat" required>
+      <option value="">먼저 중분류 선택</option>
+    </select><br/>
+
     시간: <input name="time" placeholder="예: 30분" required /><br/>
     레벨: <input name="level" placeholder="예: 초급" required /><br/>
     태그: <input name="tag" placeholder="예: 자격증 포함" /><br/>
@@ -30,36 +37,36 @@
     <button type="submit">업로드</button>
   </form>
 
-  <!-- JSON 문자열을 data attribute 에 넣는다 -->
+  <!-- subs, leafs 데이터를 JSON으로 숨겨놓고 -->
   <script id="subs-data" type="application/json">
     {{ subs | tojson }}
   </script>
+  <script id="leafs-data" type="application/json">
+    {{ leafs | tojson }}
+  </script>
 
   <script>
-    // 1) 먼저 DOM에서 JSON 문자열을 추출
-    const subsJson = document.getElementById('subs-data').textContent.trim();
-    // 2) JS 객체로 파싱
-    let subs = {};
-    try {
-      subs = JSON.parse(subsJson);
-    } catch (e) {
-      console.error("⚠️ subs JSON 파싱 오류:", e, subsJson);
-    }
+    // JSON 파싱
+    const subs  = JSON.parse(document.getElementById('subs-data').textContent);
+    const leafs = JSON.parse(document.getElementById('leafs-data').textContent);
 
-    // 이제 대분류 선택 시 소분류를 채워주는 함수
-    document.getElementById('main_cat').addEventListener('change', syncSub);
+    const mainSel = document.getElementById('main_cat');
+    const subSel  = document.getElementById('sub_cat');
+    const leafSel = document.getElementById('leaf_cat');
 
-    function syncSub() {
-      const main = this.value;
-      const sel  = document.getElementById('sub_cat');
-      sel.innerHTML = '<option value="">선택</option>';
-      (subs[main] || []).forEach(s => {
-        sel.innerHTML += `<option value="${s}">${s}</option>`;
-      });
-    }
+    mainSel.addEventListener('change', () => {
+      const mids = subs[mainSel.value] || [];
+      subSel.innerHTML = '<option value="">선택</option>'
+        + mids.map(m => `<option value="${m}">${m}</option>`).join('');
+      // 소분류 초기화
+      leafSel.innerHTML = '<option value="">먼저 중분류 선택</option>';
+    });
 
-    // 디버그: subs 내용 확인
-    console.log("subs mapping:", subs);
+    subSel.addEventListener('change', () => {
+      const lst = leafs[subSel.value] || [];
+      leafSel.innerHTML = '<option value="">선택</option>'
+        + lst.map(l => `<option value="${l}">${l}</option>`).join('');
+    });
   </script>
 </body>
 </html>

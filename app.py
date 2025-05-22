@@ -125,13 +125,35 @@ def login():
 def upload_form():
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
+
+    # 대분류 리스트
     main_cats = ['기계','공구','장비']
+
+    # 대분류 → 중분류 매핑
     sub_map   = {
-        '기계':['공작기계','제조기계','산업기계'],
-        '공구':['수공구','전동공구','절삭공구'],
-        '장비':['안전장비','운송장비','작업장비']
+        '기계': ['공작기계','제조기계','산업기계'],
+        '공구': ['수공구','전동공구','절삭공구'],
+        '장비': ['안전장비','운송장비','작업장비']
     }
-    return render_template('upload_form.html', mains=main_cats, subs=sub_map)
+
+    # 중분류 → 소분류 매핑
+    leaf_map = {
+        '공작기계': ['불도저','크레인','굴착기'],
+        '제조기계': ['사출 성형기','프레스기','열성형기'],
+        '산업기계': ['CNC 선반','절삭기','연삭기'],
+        '수공구':   ['드릴','해머','플라이어'],
+        '전동공구': ['그라인더','전동 드릴','해머드릴'],
+        '절삭공구': ['커터','플라즈마 노즐','드릴 비트'],
+        '안전장비': ['헬멧','방진 마스크','낙하 방지벨트'],
+        '운송장비': ['리프트 장비','체인 블록','호이스트'],
+        '작업장비': ['스캐폴딩','작업대','리프트 테이블']
+    }
+
+    return render_template('upload_form.html',
+        mains=main_cats,
+        subs=sub_map,
+        leafs=leaf_map
+    )
 
 @app.route('/upload', methods=['POST'])
 def upload_video():
@@ -143,6 +165,7 @@ def upload_video():
     group_name    = request.form.get('group_name','default')
     main_cat      = request.form.get('main_category','')
     sub_cat       = request.form.get('sub_category','')
+    leaf_cat      = request.form.get('sub_sub_category','')  # 추가
     lecture_time  = request.form.get('time','')
     lecture_level = request.form.get('level','')
     lecture_tag   = request.form.get('tag','')
@@ -177,24 +200,25 @@ def upload_video():
 
     # 6) Firestore에 메타데이터 저장
     db.collection('uploads').document(group_id).set({
-        'group_id':      group_id,
-        'group_name':    group_name,
-        'main_category': main_cat,
-        'sub_category':  sub_cat,
-        'time':          lecture_time,
-        'level':         lecture_level,
-        'tag':           lecture_tag,
-        'video_key':     video_key,
-        'presigned_url': presigned_url,
-        'branch_url':    branch_url,
-        'qr_key':        qr_key,
-        'upload_date':   date_str
+        'group_id':        group_id,
+        'group_name':      group_name,
+        'main_category':   main_cat,
+        'sub_category':    sub_cat,
+        'sub_sub_category': leaf_cat,
+        'time':            lecture_time,
+        'level':           lecture_level,
+        'tag':             lecture_tag,
+        'video_key':       video_key,
+        'presigned_url':   presigned_url,
+        'branch_url':      branch_url,
+        'qr_key':          qr_key,
+        'upload_date':     date_str
     })
 
     # 7) 성공 페이지 렌더링
     return render_template('success.html',
         group_id=group_id,
-        main=main_cat, sub=sub_cat,
+        main=main_cat, sub=sub_cat, leaf=leaf_cat,
         time=lecture_time, level=lecture_level, tag=lecture_tag,
         presigned_url=presigned_url,
         branch_url=branch_url,
@@ -203,9 +227,6 @@ def upload_video():
 
 @app.route('/watch/<group_id>', methods=['GET'])
 def watch(group_id):
-    """
-    Firestore에서 presigned_url을 조회해 watch.html로 렌더
-    """
     doc = db.collection('uploads').document(group_id).get()
     if not doc.exists:
         abort(404)
