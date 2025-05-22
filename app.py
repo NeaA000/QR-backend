@@ -196,9 +196,11 @@ def upload_video():
     presigned_url = generate_presigned_url(video_key, expires_in=604800)
     branch_url = create_branch_link(presigned_url, group_id)
 
+    # QR에는 /watch/<group_id> 고정 링크를 사용
+    fixed_watch_url = f"{APP_BASE_URL}{group_id}"
     qr_filename = f"{uuid.uuid4().hex}.png"
     local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
-    create_qr_with_logo(branch_url, local_qr)
+    create_qr_with_logo(fixed_watch_url, local_qr)
     qr_key = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
