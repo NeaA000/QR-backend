@@ -17,6 +17,9 @@ from urllib.parse import urlparse, parse_qs
 import firebase_admin
 from firebase_admin import credentials, firestore
 
+# 비디오 메타 추출을 위한 moviepy
+from moviepy.editor import VideoFileClip
+
 # ==== 환경변수 설정 ====
 ADMIN_PASSWORD   = os.environ.get('ADMIN_PASSWORD', 'changeme')
 AWS_ACCESS_KEY   = os.environ['AWS_ACCESS_KEY']
@@ -50,7 +53,7 @@ db = firestore.client()
 # ==== Flask 앱 설정 ====
 app = Flask(__name__)
 app.secret_key                   = SECRET_KEY
-app.config['UPLOAD_FOLDER']     = 'static'
+app.config['UPLOAD_FOLDER']      = 'static'
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB
 
 # ==== Wasabi S3 클라이언트 ====
@@ -181,45 +184,67 @@ def upload_video():
     if not file:
         return "파일이 필요합니다.", 400
 
+    # 임시 로컬 저장
     group_id  = uuid.uuid4().hex
     date_str  = datetime.now().strftime('%Y%m%d')
     safe_name = re.sub(r'[^\w]', '_', group_name)
-    folder    = f"videos/{group_id}_{safe_name}_{date_str}"
     ext       = Path(file.filename).suffix or '.mp4'
-    video_key = f"{folder}/video{ext}"
     tmp_path  = Path(f"./tmp{ext}")
     file.save(tmp_path)
+
+    # 비디오 메타: 길이 추출
+    clip = VideoFileClip(str(tmp_path))
+    duration_sec = clip.duration
+    clip.close()
+
+    # S3 업로드
+    folder    = f"videos/{group_id}_{safe_name}_{date_str}"
+    video_key = f"{folder}/video{ext}"
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
 
     presigned_url = generate_presigned_url(video_key, expires_in=604800)
-    branch_url = create_branch_link(presigned_url, group_id)
+    branch_url    = create_branch_link(presigned_url, group_id)
 
-    # QR에는 branch_url을 사용 → 앱 또는 웹 fallback 대응
+    # QR 생성·업로드
     qr_filename = f"{uuid.uuid4().hex}.png"
     local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
     create_qr_with_logo(branch_url, local_qr)
-    qr_key = f"{folder}/{qr_filename}"
+    qr_key      = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
+    # Firestore 저장: durationSec 필드 추가
     db.collection('uploads').document(group_id).set({
-        'group_id':        group_id,
-        'group_name':      group_name,
-        'main_category':   main_cat,
-        'sub_category':    sub_cat,
+        'group_id':         group_id,
+        'group_name':       group_name,
+        'main_category':    main_cat,
+        'sub_category':     sub_cat,
         'sub_sub_category': leaf_cat,
-        'time':            lecture_time,
-        'level':           lecture_level,
-        'tag':             lecture_tag,
-        'video_key':       video_key,
-        'presigned_url':   presigned_url,
-        'branch_url':      branch_url,
+        'time':             lecture_time,
+        'level':            lecture_level,
+        'tag':              lecture_tag,
+        'video_key':        video_key,
+        'presigned_url':    presigned_url,
+        'branch_url':       branch_url,
         'branch_updated_at': datetime.utcnow().isoformat(),
-        'qr_key':          qr_key,
-        'upload_date':     date_str
-    })
+        'qr_key':           qr_key,
+        'upload_date':      date_str,
+        'durationSec':      duration_sec,      # 실제 길이 (초)
+    }, merge=True)
 
-    return render_template('success.html', group_id=group_id, main=main_cat, sub=sub_cat, leaf=leaf_cat, time=lecture_time, level=lecture_level, tag=lecture_tag, presigned_url=presigned_url, branch_url=branch_url, qr_url=url_for('static', filename=qr_filename))
+    return render_template(
+        'success.html',
+        group_id=group_id,
+        main=main_cat,
+        sub=sub_cat,
+        leaf=leaf_cat,
+        time=lecture_time,
+        level=lecture_level,
+        tag=lecture_tag,
+        presigned_url=presigned_url,
+        branch_url=branch_url,
+        qr_url=url_for('static', filename=qr_filename)
+    )
 
 @app.route('/watch/<group_id>', methods=['GET'])
 def watch(group_id):
@@ -230,18 +255,17 @@ def watch(group_id):
     data = doc.to_dict()
 
     current_presigned = data.get('presigned_url', '')
-    current_branch_url = data.get('branch_url', '')
     should_renew = not current_presigned or is_presigned_url_expired(current_presigned, 60)
 
     if should_renew:
-        new_presigned_url = generate_presigned_url(data['video_key'], expires_in=604800)
-        new_branch_url = create_branch_link(new_presigned_url, group_id)
+        new_presigned = generate_presigned_url(data['video_key'], expires_in=604800)
+        new_branch    = create_branch_link(new_presigned, group_id)
         doc_ref.update({
-            'presigned_url': new_presigned_url,
-            'branch_url': new_branch_url,
+            'presigned_url':    new_presigned,
+            'branch_url':       new_branch,
             'branch_updated_at': datetime.utcnow().isoformat()
         })
-        video_url = new_presigned_url
+        video_url = new_presigned
     else:
         video_url = current_presigned
 
