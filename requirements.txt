@@ -5,4 +5,4 @@ firebase-admin
 qrcode
 Pillow
 requests
-moviepy
+moviepy>=2.2.1
