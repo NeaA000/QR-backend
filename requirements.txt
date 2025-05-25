@@ -6,3 +6,6 @@ qrcode
 Pillow
 requests
 moviepy>=2.2.1
+imageio-ffmpeg
+numpy
+decorator
