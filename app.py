@@ -14,28 +14,32 @@ import qrcode
 from PIL import Image
 import requests
 from urllib.parse import urlparse, parse_qs
+# 비디오 길이 추출을 위한 라이브러리
+from moviepy.editor import VideoFileClip
 
 import firebase_admin
 from firebase_admin import credentials, firestore
 
 # ==== 환경변수 설정 ====
-ADMIN_PASSWORD   = os.environ.get('ADMIN_PASSWORD', 'changeme')
-AWS_ACCESS_KEY   = os.environ['AWS_ACCESS_KEY']
-AWS_SECRET_KEY   = os.environ['AWS_SECRET_KEY']
-REGION_NAME      = os.environ['REGION_NAME']
-BUCKET_NAME      = os.environ['BUCKET_NAME']
-APP_BASE_URL     = os.environ.get('APP_BASE_URL', 'http://localhost:5000/watch/')
-BRANCH_KEY       = os.environ['BRANCH_KEY']
-BRANCH_API_URL   = 'https://api2.branch.io/v1/url'
-SECRET_KEY       = os.environ.get('FLASK_SECRET_KEY', 'supersecret')
+# 운영 환경에 필요한 주요 설정을 환경 변수에서 로드
+ADMIN_PASSWORD   = os.environ.get('ADMIN_PASSWORD', 'changeme')     # 관리자 페이지 접근 비밀번호
+AWS_ACCESS_KEY   = os.environ['AWS_ACCESS_KEY']                     # Wasabi S3 접근 키
+AWS_SECRET_KEY   = os.environ['AWS_SECRET_KEY']                     # Wasabi S3 비밀 키
+REGION_NAME      = os.environ['REGION_NAME']                        # Wasabi S3 리전
+BUCKET_NAME      = os.environ['BUCKET_NAME']                        # 업로드 대상 버킷 이름
+APP_BASE_URL     = os.environ.get('APP_BASE_URL', 'http://localhost:5000/watch/')  # Branch 딥링크의 fallback URL 기본값
+BRANCH_KEY       = os.environ['BRANCH_KEY']                         # Branch.io API 키
+BRANCH_API_URL   = 'https://api2.branch.io/v1/url'                  # Branch API 엔드포인트
+SECRET_KEY       = os.environ.get('FLASK_SECRET_KEY', 'supersecret') # Flask 세션 암호화 키
 
 # ==== Firebase Admin + Firestore 초기화 ====
+# Firebase Admin SDK를 통해 Firestore 사용 준비
 if not firebase_admin._apps:
     firebase_creds = {
         "type":                        os.environ["type"],
         "project_id":                  os.environ["project_id"],
         "private_key_id":              os.environ["private_key_id"],
-        "private_key":                 os.environ["private_key"].replace('\\n', '\n'),
+        "private_key":                 os.environ["private_key"].replace('\\n','\n'),
         "client_email":                os.environ["client_email"],
         "client_id":                   os.environ["client_id"],
         "auth_uri":                    os.environ["auth_uri"],
@@ -46,18 +50,20 @@ if not firebase_admin._apps:
     cred = credentials.Certificate(firebase_creds)
     firebase_admin.initialize_app(cred)
 
+# Firestore 클라이언트 인스턴스 생성
 db = firestore.client()
 
 # ==== Flask 앱 설정 ====
 app = Flask(__name__)
 app.secret_key                   = SECRET_KEY
-app.config['UPLOAD_FOLDER']     = 'static'
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB
+app.config['UPLOAD_FOLDER']      = 'static'  # 정적 파일(QR 이미지 등) 저장 디렉토리
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 업로드 허용 최대 크기: 2GB
 
-# 애플리케이션 시작 시에 static 폴더가 반드시 존재하도록 생성
+# 앱 시작 시 static 디렉토리가 없으면 생성
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# ==== Wasabi S3 클라이언트 ====
+# ==== Wasabi S3 클라이언트 설정 ====
+# S3 호환 Wasabi 서비스 연결 설정
 s3 = boto3.client(
     's3',
     aws_access_key_id     = AWS_ACCESS_KEY,
@@ -65,6 +71,7 @@ s3 = boto3.client(
     region_name           = REGION_NAME,
     endpoint_url          = f'https://s3.{REGION_NAME}.wasabisys.com'
 )
+# 대용량 파일 업로드를 위한 멀티파트 전송 구성
 config = TransferConfig(
     multipart_threshold = 1024 * 1024 * 25,
     multipart_chunksize = 1024 * 1024 * 50,
@@ -74,6 +81,10 @@ config = TransferConfig(
 
 # ==== 유틸리티 함수들 ====
 def generate_presigned_url(key, expires_in=86400):
+    """
+    S3 객체에 대해 presigned URL 생성
+    expires_in: URL 유효 기간(초 단위)
+    """
     return s3.generate_presigned_url(
         ClientMethod='get_object',
         Params={'Bucket': BUCKET_NAME, 'Key': key},
@@ -81,16 +92,21 @@ def generate_presigned_url(key, expires_in=86400):
     )
 
 def create_branch_link(deep_url, group_id):
+    """
+    Branch.io API 호출하여 딥링크 생성
+    deep_url: 실제 동영상 접근용 presigned URL
+    group_id: 고유 identifier
+    """
     payload = {
         "branch_key": BRANCH_KEY,
         "campaign":   "lecture_upload",
         "channel":    "flask_server",
         "data": {
-            "$desktop_url": deep_url,
-            "$ios_url":     deep_url,
-            "$android_url": deep_url,
+            "$desktop_url":  deep_url,
+            "$ios_url":      deep_url,
+            "$android_url":  deep_url,
             "$fallback_url": f"{APP_BASE_URL}{group_id}",
-            "lecture_url":  deep_url
+            "lecture_url":   deep_url
         }
     }
     res = requests.post(BRANCH_API_URL, json=payload)
@@ -98,47 +114,57 @@ def create_branch_link(deep_url, group_id):
     return res.json().get('url')
 
 def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size_ratio=0.25):
+    """
+    QR 코드 생성 후 중앙에 로고 삽입
+    error_correction: 복원율 높게 설정
+    """
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
     qr.add_data(link_url)
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+
+    # 로고 파일이 있으면 QR 중앙에 배치
     if os.path.exists(logo_path):
         logo = Image.open(logo_path)
         qr_w, qr_h = qr_img.size
         logo_size = int(qr_w * size_ratio)
         logo = logo.resize((logo_size, logo_size), Image.LANCZOS)
-        pos = ((qr_w-logo_size)//2, (qr_h-logo_size)//2)
-        qr_img.paste(logo, pos, mask=(logo if logo.mode=='RGBA' else None))
+        pos = ((qr_w - logo_size) // 2, (qr_h - logo_size) // 2)
+        qr_img.paste(logo, pos, mask=(logo if logo.mode == 'RGBA' else None))
+
     qr_img.save(output_path)
 
 def is_presigned_url_expired(url, safety_margin_minutes=60):
+    """
+    presigned URL 만료 여부 확인
+    safety_margin_minutes: 여유 시간(분 단위)
+    """
     try:
         parsed = urlparse(url)
         query = parse_qs(parsed.query)
-
+        # 필요한 파라미터가 없으면 만료로 처리
         if 'X-Amz-Date' not in query or 'X-Amz-Expires' not in query:
             return True
-
         issued_str = query['X-Amz-Date'][0]
         expires_in = int(query['X-Amz-Expires'][0])
-
         issued_time = datetime.strptime(issued_str, '%Y%m%dT%H%M%SZ')
         expiry_time = issued_time + timedelta(seconds=expires_in)
         margin_time = datetime.utcnow() + timedelta(minutes=safety_margin_minutes)
-
         return margin_time >= expiry_time
     except Exception as e:
         print(f"URL 검사 중 오류: {e}")
         return True
 
-# ==== 라우팅 ====
+# ==== 라우팅 설정 ====
 @app.route('/', methods=['GET'])
 def login_page():
+    """로그인 페이지 렌더링"""
     return render_template('login.html')
 
 @app.route('/login', methods=['POST'])
 def login():
-    pw = request.form.get('password','')
+    """관리자 비밀번호 검증 후 세션 부여"""
+    pw = request.form.get('password', '')
     if pw == ADMIN_PASSWORD:
         session['logged_in'] = True
         return redirect(url_for('upload_form'))
@@ -146,45 +172,56 @@ def login():
 
 @app.route('/upload_form', methods=['GET'])
 def upload_form():
+    """
+    업로드 폼 페이지 (인증 필요)
+    카테고리 목록 및 매핑 정보를 템플릿에 전달
+    """
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
 
-    main_cats = ['기계','공구','장비']
-    sub_map   = {
-        '기계': ['공작기계','제조기계','산업기계'],
-        '공구': ['수공구','전동공구','절삭공구'],
-        '장비': ['안전장비','운송장비','작업장비']
+    main_cats = ['기계', '공구', '장비']
+    sub_map = {
+        '기계': ['공작기계', '제조기계', '산업기계'],
+        '공구': ['수공구', '전동공구', '절삭공구'],
+        '장비': ['안전장비', '운송장비', '작업장비']
     }
     leaf_map = {
-        '공작기계': ['불도저','크레인','굴착기'],
-        '제조기계': ['사출 성형기','프레스기','열성형기'],
-        '산업기계': ['CNC 선반','절삭기','연삭기'],
-        '수공구':   ['드릴','해머','플라이어'],
-        '전동공구': ['그라인더','전동 드릴','해머드릴'],
-        '절삭공구': ['커터','플라즈마 노즐','드릴 비트'],
-        '안전장비': ['헬멧','방진 마스크','낙하 방지벨트'],
-        '운송장비': ['리프트 장비','체인 블록','호이스트'],
-        '작업장비': ['스캐폴딩','작업대','리프트 테이블']
+        '공작기계': ['불도저', '크레인', '굴착기'],
+        '제조기계': ['사출 성형기', '프레스기', '열성형기'],
+        '산업기계': ['CNC 선반', '절삭기', '연삭기'],
+        '수공구':   ['드릴', '해머', '플라이어'],
+        '전동공구': ['그라인더', '전동 드릴', '해머드릴'],
+        '절삭공구': ['커터', '플라즈마 노즐', '드릴 비트'],
+        '안전장비': ['헬멧', '방진 마스크', '낙하 방지벨트'],
+        '운송장비': ['리프트 장비', '체인 블록', '호이스트'],
+        '작업장비': ['스캐폴딩', '작업대', '리프트 테이블']
     }
     return render_template('upload_form.html', mains=main_cats, subs=sub_map, leafs=leaf_map)
 
 @app.route('/upload', methods=['POST'])
 def upload_video():
+    """
+    동영상 업로드 처리 핸들러
+    1) 임시 저장 → Wasabi S3 업로드
+    2) Presigned URL 생성 → Branch 딥링크 생성
+    3) QR 코드 생성 및 S3 업로드
+    4) Firestore에 메타데이터 저장
+    """
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
 
+    # 업로드 폼 데이터
     file          = request.files.get('file')
     group_name    = request.form.get('group_name','default')
     main_cat      = request.form.get('main_category','')
     sub_cat       = request.form.get('sub_category','')
     leaf_cat      = request.form.get('sub_sub_category','')
-    lecture_time  = request.form.get('time','')
-    lecture_level = request.form.get('level','')
     lecture_tag   = request.form.get('tag','')
 
     if not file:
         return "파일이 필요합니다.", 400
 
+    # 고유 식별자 및 S3 Key 경로 생성
     group_id  = uuid.uuid4().hex
     date_str  = datetime.now().strftime('%Y%m%d')
     safe_name = re.sub(r'[^\w]', '_', group_name)
@@ -192,45 +229,55 @@ def upload_video():
     ext       = Path(file.filename).suffix or '.mp4'
     video_key = f"{folder}/video{ext}"
 
-    # 시스템 임시 폴더에 저장
+    # 시스템 임시 폴더에 파일 저장 및 길이 추출
     tmp_path = Path(tempfile.gettempdir()) / f"{group_id}{ext}"
     file.save(tmp_path)
+    clip = VideoFileClip(str(tmp_path))
+    duration_seconds = clip.duration
+    clip.close()
+    minutes = int(duration_seconds // 60)
+    seconds = int(duration_seconds % 60)
+    lecture_time = f"{minutes:02d}:{seconds:02d}"
+
+    # Wasabi S3로 업로드
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
 
+    # Presigned URL 및 Branch 딥링크 생성
     presigned_url = generate_presigned_url(video_key, expires_in=604800)
-    branch_url = create_branch_link(presigned_url, group_id)
+    branch_url    = create_branch_link(presigned_url, group_id)
 
-    # QR 생성 및 업로드
+    # QR 코드 생성 및 S3 업로드
     qr_filename = f"{uuid.uuid4().hex}.png"
     local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
     create_qr_with_logo(branch_url, local_qr)
     qr_key = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
-    # Firestore에 기록
+    # Firestore에 메타데이터 저장
     db.collection('uploads').document(group_id).set({
-        'group_id':        group_id,
-        'group_name':      group_name,
-        'main_category':   main_cat,
-        'sub_category':    sub_cat,
+        'group_id':         group_id,
+        'group_name':       group_name,
+        'main_category':    main_cat,
+        'sub_category':     sub_cat,
         'sub_sub_category': leaf_cat,
-        'time':            lecture_time,
-        'level':           lecture_level,
-        'tag':             lecture_tag,
-        'video_key':       video_key,
-        'presigned_url':   presigned_url,
-        'branch_url':      branch_url,
+        'time':             lecture_time,
+        'duration_seconds': duration_seconds,
+        'tag':              lecture_tag,
+        'video_key':        video_key,
+        'presigned_url':    presigned_url,
+        'branch_url':       branch_url,
         'branch_updated_at': datetime.utcnow().isoformat(),
-        'qr_key':          qr_key,
-        'upload_date':     date_str
+        'qr_key':           qr_key,
+        'upload_date':      date_str
     })
 
     return render_template(
         'success.html',
         group_id=group_id,
         main=main_cat, sub=sub_cat, leaf=leaf_cat,
-        time=lecture_time, level=lecture_level, tag=lecture_tag,
+        time=lecture_time, level=request.form.get('level',''),
+        tag=lecture_tag,
         presigned_url=presigned_url,
         branch_url=branch_url,
         qr_url=url_for('static', filename=qr_filename)
@@ -238,6 +285,10 @@ def upload_video():
 
 @app.route('/watch/<group_id>', methods=['GET'])
 def watch(group_id):
+    """
+    동영상 시청 페이지
+    - Presigned URL이 만료되었으면 재생성 후 업데이트
+    """
     doc_ref = db.collection('uploads').document(group_id)
     doc = doc_ref.get()
     if not doc.exists:
@@ -249,10 +300,10 @@ def watch(group_id):
 
     if should_renew:
         new_presigned_url = generate_presigned_url(data['video_key'], expires_in=604800)
-        new_branch_url = create_branch_link(new_presigned_url, group_id)
+        new_branch_url    = create_branch_link(new_presigned_url, group_id)
         doc_ref.update({
-            'presigned_url': new_presigned_url,
-            'branch_url': new_branch_url,
+            'presigned_url':     new_presigned_url,
+            'branch_url':        new_branch_url,
             'branch_updated_at': datetime.utcnow().isoformat()
         })
         video_url = new_presigned_url
