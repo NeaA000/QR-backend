@@ -2,6 +2,7 @@ import os
 import uuid
 import re
 import tempfile
+import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
 from flask import (
@@ -14,26 +15,22 @@ import qrcode
 from PIL import Image
 import requests
 from urllib.parse import urlparse, parse_qs
-# 비디오 길이 추출을 위한 라이브러리
-from moviepy.editor import VideoFileClip
 
 import firebase_admin
 from firebase_admin import credentials, firestore
 
 # ==== 환경변수 설정 ====
-# 운영 환경에 필요한 주요 설정을 환경 변수에서 로드
-ADMIN_PASSWORD   = os.environ.get('ADMIN_PASSWORD', 'changeme')     # 관리자 페이지 접근 비밀번호
-AWS_ACCESS_KEY   = os.environ['AWS_ACCESS_KEY']                     # Wasabi S3 접근 키
-AWS_SECRET_KEY   = os.environ['AWS_SECRET_KEY']                     # Wasabi S3 비밀 키
-REGION_NAME      = os.environ['REGION_NAME']                        # Wasabi S3 리전
-BUCKET_NAME      = os.environ['BUCKET_NAME']                        # 업로드 대상 버킷 이름
-APP_BASE_URL     = os.environ.get('APP_BASE_URL', 'http://localhost:5000/watch/')  # Branch 딥링크의 fallback URL 기본값
-BRANCH_KEY       = os.environ['BRANCH_KEY']                         # Branch.io API 키
-BRANCH_API_URL   = 'https://api2.branch.io/v1/url'                  # Branch API 엔드포인트
-SECRET_KEY       = os.environ.get('FLASK_SECRET_KEY', 'supersecret') # Flask 세션 암호화 키
+ADMIN_PASSWORD   = os.environ.get('ADMIN_PASSWORD', 'changeme')
+AWS_ACCESS_KEY   = os.environ['AWS_ACCESS_KEY']
+AWS_SECRET_KEY   = os.environ['AWS_SECRET_KEY']
+REGION_NAME      = os.environ['REGION_NAME']
+BUCKET_NAME      = os.environ['BUCKET_NAME']
+APP_BASE_URL     = os.environ.get('APP_BASE_URL', 'http://localhost:5000/watch/')
+BRANCH_KEY       = os.environ['BRANCH_KEY']
+BRANCH_API_URL   = 'https://api2.branch.io/v1/url'
+SECRET_KEY       = os.environ.get('FLASK_SECRET_KEY', 'supersecret')
 
 # ==== Firebase Admin + Firestore 초기화 ====
-# Firebase Admin SDK를 통해 Firestore 사용 준비
 if not firebase_admin._apps:
     firebase_creds = {
         "type":                        os.environ["type"],
@@ -50,20 +47,16 @@ if not firebase_admin._apps:
     cred = credentials.Certificate(firebase_creds)
     firebase_admin.initialize_app(cred)
 
-# Firestore 클라이언트 인스턴스 생성
 db = firestore.client()
 
 # ==== Flask 앱 설정 ====
 app = Flask(__name__)
 app.secret_key                   = SECRET_KEY
-app.config['UPLOAD_FOLDER']      = 'static'  # 정적 파일(QR 이미지 등) 저장 디렉토리
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 업로드 허용 최대 크기: 2GB
-
-# 앱 시작 시 static 디렉토리가 없으면 생성
+app.config['UPLOAD_FOLDER']      = 'static'  
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # ==== Wasabi S3 클라이언트 설정 ====
-# S3 호환 Wasabi 서비스 연결 설정
 s3 = boto3.client(
     's3',
     aws_access_key_id     = AWS_ACCESS_KEY,
@@ -71,7 +64,6 @@ s3 = boto3.client(
     region_name           = REGION_NAME,
     endpoint_url          = f'https://s3.{REGION_NAME}.wasabisys.com'
 )
-# 대용량 파일 업로드를 위한 멀티파트 전송 구성
 config = TransferConfig(
     multipart_threshold = 1024 * 1024 * 25,
     multipart_chunksize = 1024 * 1024 * 50,
@@ -116,14 +108,12 @@ def create_branch_link(deep_url, group_id):
 def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size_ratio=0.25):
     """
     QR 코드 생성 후 중앙에 로고 삽입
-    error_correction: 복원율 높게 설정
     """
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
     qr.add_data(link_url)
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
 
-    # 로고 파일이 있으면 QR 중앙에 배치
     if os.path.exists(logo_path):
         logo = Image.open(logo_path)
         qr_w, qr_h = qr_img.size
@@ -137,12 +127,10 @@ def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size
 def is_presigned_url_expired(url, safety_margin_minutes=60):
     """
     presigned URL 만료 여부 확인
-    safety_margin_minutes: 여유 시간(분 단위)
     """
     try:
         parsed = urlparse(url)
         query = parse_qs(parsed.query)
-        # 필요한 파라미터가 없으면 만료로 처리
         if 'X-Amz-Date' not in query or 'X-Amz-Expires' not in query:
             return True
         issued_str = query['X-Amz-Date'][0]
@@ -154,6 +142,22 @@ def is_presigned_url_expired(url, safety_margin_minutes=60):
     except Exception as e:
         print(f"URL 검사 중 오류: {e}")
         return True
+
+def get_video_duration_seconds(path):
+    """
+    ffprobe를 호출해 영상 길이를 초 단위로 반환
+    """
+    result = subprocess.run([
+        'ffprobe', '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'format=duration',
+        '-of', 'default=noprint_wrappers=1:nokey=1',
+        path
+    ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        return float(result.stdout.strip())
+    except:
+        return 0.0
 
 # ==== 라우팅 설정 ====
 @app.route('/', methods=['GET'])
@@ -203,14 +207,14 @@ def upload_video():
     """
     동영상 업로드 처리 핸들러
     1) 임시 저장 → Wasabi S3 업로드
-    2) Presigned URL 생성 → Branch 딥링크 생성
-    3) QR 코드 생성 및 S3 업로드
-    4) Firestore에 메타데이터 저장
+    2) ffprobe 호출로 길이 추출
+    3) Presigned URL 생성 → Branch 딥링크 생성
+    4) QR 코드 생성 및 S3 업로드
+    5) Firestore에 메타데이터 저장
     """
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
 
-    # 업로드 폼 데이터
     file          = request.files.get('file')
     group_name    = request.form.get('group_name','default')
     main_cat      = request.form.get('main_category','')
@@ -221,7 +225,6 @@ def upload_video():
     if not file:
         return "파일이 필요합니다.", 400
 
-    # 고유 식별자 및 S3 Key 경로 생성
     group_id  = uuid.uuid4().hex
     date_str  = datetime.now().strftime('%Y%m%d')
     safe_name = re.sub(r'[^\w]', '_', group_name)
@@ -229,17 +232,17 @@ def upload_video():
     ext       = Path(file.filename).suffix or '.mp4'
     video_key = f"{folder}/video{ext}"
 
-    # 시스템 임시 폴더에 파일 저장 및 길이 추출
+    # 임시 저장
     tmp_path = Path(tempfile.gettempdir()) / f"{group_id}{ext}"
     file.save(tmp_path)
-    clip = VideoFileClip(str(tmp_path))
-    duration_seconds = clip.duration
-    clip.close()
+
+    # ffprobe로 길이 추출
+    duration_seconds = get_video_duration_seconds(str(tmp_path))
     minutes = int(duration_seconds // 60)
     seconds = int(duration_seconds % 60)
     lecture_time = f"{minutes:02d}:{seconds:02d}"
 
-    # Wasabi S3로 업로드
+    # Wasabi S3 업로드
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
 
@@ -274,13 +277,16 @@ def upload_video():
 
     return render_template(
         'success.html',
-        group_id=group_id,
-        main=main_cat, sub=sub_cat, leaf=leaf_cat,
-        time=lecture_time, level=request.form.get('level',''),
-        tag=lecture_tag,
-        presigned_url=presigned_url,
-        branch_url=branch_url,
-        qr_url=url_for('static', filename=qr_filename)
+        group_id     = group_id,
+        main         = main_cat,
+        sub          = sub_cat,
+        leaf         = leaf_cat,
+        time         = lecture_time,
+        level        = request.form.get('level',''),
+        tag          = lecture_tag,
+        presigned_url= presigned_url,
+        branch_url   = branch_url,
+        qr_url       = url_for('static', filename=qr_filename)
     )
 
 @app.route('/watch/<group_id>', methods=['GET'])
@@ -290,13 +296,13 @@ def watch(group_id):
     - Presigned URL이 만료되었으면 재생성 후 업데이트
     """
     doc_ref = db.collection('uploads').document(group_id)
-    doc = doc_ref.get()
+    doc     = doc_ref.get()
     if not doc.exists:
         abort(404)
-    data = doc.to_dict()
+    data    = doc.to_dict()
 
     current_presigned = data.get('presigned_url', '')
-    should_renew = not current_presigned or is_presigned_url_expired(current_presigned, 60)
+    should_renew      = not current_presigned or is_presigned_url_expired(current_presigned, 60)
 
     if should_renew:
         new_presigned_url = generate_presigned_url(data['video_key'], expires_in=604800)
