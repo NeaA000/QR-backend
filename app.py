@@ -1,6 +1,7 @@
 import os
 import uuid
 import re
+import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
 from flask import (
@@ -52,6 +53,9 @@ app = Flask(__name__)
 app.secret_key                   = SECRET_KEY
 app.config['UPLOAD_FOLDER']     = 'static'
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB
+
+# 애플리케이션 시작 시에 static 폴더가 반드시 존재하도록 생성
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # ==== Wasabi S3 클라이언트 ====
 s3 = boto3.client(
@@ -187,7 +191,9 @@ def upload_video():
     folder    = f"videos/{group_id}_{safe_name}_{date_str}"
     ext       = Path(file.filename).suffix or '.mp4'
     video_key = f"{folder}/video{ext}"
-    tmp_path  = Path(f"./tmp{ext}")
+
+    # 시스템 임시 폴더에 저장
+    tmp_path = Path(tempfile.gettempdir()) / f"{group_id}{ext}"
     file.save(tmp_path)
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
@@ -195,13 +201,14 @@ def upload_video():
     presigned_url = generate_presigned_url(video_key, expires_in=604800)
     branch_url = create_branch_link(presigned_url, group_id)
 
-    # QR에는 branch_url을 사용 → 앱 또는 웹 fallback 대응
+    # QR 생성 및 업로드
     qr_filename = f"{uuid.uuid4().hex}.png"
     local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
     create_qr_with_logo(branch_url, local_qr)
     qr_key = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
+    # Firestore에 기록
     db.collection('uploads').document(group_id).set({
         'group_id':        group_id,
         'group_name':      group_name,
@@ -219,7 +226,15 @@ def upload_video():
         'upload_date':     date_str
     })
 
-    return render_template('success.html', group_id=group_id, main=main_cat, sub=sub_cat, leaf=leaf_cat, time=lecture_time, level=lecture_level, tag=lecture_tag, presigned_url=presigned_url, branch_url=branch_url, qr_url=url_for('static', filename=qr_filename))
+    return render_template(
+        'success.html',
+        group_id=group_id,
+        main=main_cat, sub=sub_cat, leaf=leaf_cat,
+        time=lecture_time, level=lecture_level, tag=lecture_tag,
+        presigned_url=presigned_url,
+        branch_url=branch_url,
+        qr_url=url_for('static', filename=qr_filename)
+    )
 
 @app.route('/watch/<group_id>', methods=['GET'])
 def watch(group_id):
@@ -230,7 +245,6 @@ def watch(group_id):
     data = doc.to_dict()
 
     current_presigned = data.get('presigned_url', '')
-    current_branch_url = data.get('branch_url', '')
     should_renew = not current_presigned or is_presigned_url_expired(current_presigned, 60)
 
     if should_renew:
@@ -249,6 +263,5 @@ def watch(group_id):
 
 # ==== 서버 실행 ====
 if __name__ == '__main__':
-    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
