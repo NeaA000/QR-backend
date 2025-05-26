@@ -2,7 +2,6 @@ import os
 import uuid
 import re
 import tempfile
-import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
 from flask import (
@@ -143,22 +142,6 @@ def is_presigned_url_expired(url, safety_margin_minutes=60):
         print(f"URL 검사 중 오류: {e}")
         return True
 
-def get_video_duration_seconds(path):
-    """
-    ffprobe를 호출해 영상 길이를 초 단위로 반환
-    """
-    result = subprocess.run([
-        'ffprobe', '-v', 'error',
-        '-select_streams', 'v:0',
-        '-show_entries', 'format=duration',
-        '-of', 'default=noprint_wrappers=1:nokey=1',
-        path
-    ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    try:
-        return float(result.stdout.strip())
-    except:
-        return 0.0
-
 # ==== 라우팅 설정 ====
 @app.route('/', methods=['GET'])
 def login_page():
@@ -207,7 +190,7 @@ def upload_video():
     """
     동영상 업로드 처리 핸들러
     1) 임시 저장 → Wasabi S3 업로드
-    2) ffprobe 호출로 길이 추출
+    2) 사용자 입력 lecture_time 사용
     3) Presigned URL 생성 → Branch 딥링크 생성
     4) QR 코드 생성 및 S3 업로드
     5) Firestore에 메타데이터 저장
@@ -220,6 +203,8 @@ def upload_video():
     main_cat      = request.form.get('main_category','')
     sub_cat       = request.form.get('sub_category','')
     leaf_cat      = request.form.get('sub_sub_category','')
+    lecture_time  = request.form.get('time','')   # 사용자 입력 길이
+    lecture_level = request.form.get('level','')
     lecture_tag   = request.form.get('tag','')
 
     if not file:
@@ -232,17 +217,9 @@ def upload_video():
     ext       = Path(file.filename).suffix or '.mp4'
     video_key = f"{folder}/video{ext}"
 
-    # 임시 저장
+    # 시스템 임시 폴더에 저장
     tmp_path = Path(tempfile.gettempdir()) / f"{group_id}{ext}"
     file.save(tmp_path)
-
-    # ffprobe로 길이 추출
-    duration_seconds = get_video_duration_seconds(str(tmp_path))
-    minutes = int(duration_seconds // 60)
-    seconds = int(duration_seconds % 60)
-    lecture_time = f"{minutes:02d}:{seconds:02d}"
-
-    # Wasabi S3 업로드
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
 
@@ -265,7 +242,7 @@ def upload_video():
         'sub_category':     sub_cat,
         'sub_sub_category': leaf_cat,
         'time':             lecture_time,
-        'duration_seconds': duration_seconds,
+        'level':            lecture_level,
         'tag':              lecture_tag,
         'video_key':        video_key,
         'presigned_url':    presigned_url,
@@ -282,7 +259,7 @@ def upload_video():
         sub          = sub_cat,
         leaf         = leaf_cat,
         time         = lecture_time,
-        level        = request.form.get('level',''),
+        level        = lecture_level,
         tag          = lecture_tag,
         presigned_url= presigned_url,
         branch_url   = branch_url,
