@@ -99,7 +99,7 @@ def create_branch_link(deep_url, group_id, lecture_name):
             "$android_url":  deep_url,
             "$fallback_url": f"{APP_BASE_URL}{group_id}",
             "lecture_url":   deep_url,
-            # 커스텀 파라미터
+            # 커스텀 딥링크 파라미터 추가
             "screen":        "LectureDetail",
             "group_id":      group_id,
             "video_url":     deep_url,
@@ -144,16 +144,19 @@ def is_presigned_url_expired(url, safety_margin_minutes=60):
         expiry_time = issued_time + timedelta(seconds=expires_in)
         margin_time = datetime.utcnow() + timedelta(minutes=safety_margin_minutes)
         return margin_time >= expiry_time
-    except Exception:
+    except Exception as e:
+        print(f"URL 검사 중 오류: {e}")
         return True
 
 # ==== 라우팅 설정 ====
 @app.route('/', methods=['GET'])
 def login_page():
+    """로그인 페이지 렌더링"""
     return render_template('login.html')
 
 @app.route('/login', methods=['POST'])
 def login():
+    """관리자 비밀번호 검증 후 세션 부여"""
     pw = request.form.get('password', '')
     if pw == ADMIN_PASSWORD:
         session['logged_in'] = True
@@ -188,18 +191,19 @@ def upload_video():
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
 
-    file         = request.files.get('file')
-    group_name   = request.form.get('group_name', 'default')
-    main_cat     = request.form.get('main_category', '')
-    sub_cat      = request.form.get('sub_category', '')
-    leaf_cat     = request.form.get('sub_sub_category', '')
-    lecture_time = request.form.get('time', '')
-    lecture_level= request.form.get('level', '')
-    lecture_tag  = request.form.get('tag', '')
+    file          = request.files.get('file')
+    group_name    = request.form.get('group_name','default')
+    main_cat      = request.form.get('main_category','')
+    sub_cat       = request.form.get('sub_category','')
+    leaf_cat      = request.form.get('sub_sub_category','')
+    lecture_time  = request.form.get('time','')
+    lecture_level = request.form.get('level','')
+    lecture_tag   = request.form.get('tag','')
 
     if not file:
         return "파일이 필요합니다.", 400
 
+    # 고유 그룹 ID 및 경로 설정
     group_id  = uuid.uuid4().hex
     date_str  = datetime.now().strftime('%Y%m%d')
     safe_name = re.sub(r'[^\w]', '_', group_name)
@@ -207,20 +211,24 @@ def upload_video():
     ext       = Path(file.filename).suffix or '.mp4'
     video_key = f"{folder}/video{ext}"
 
+    # 파일 임시 저장 및 S3 업로드
     tmp_path = Path(tempfile.gettempdir()) / f"{group_id}{ext}"
     file.save(tmp_path)
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
 
+    # Presigned URL 생성 및 Branch 딥링크 생성 (lecture_name 포함)
     presigned_url = generate_presigned_url(video_key, expires_in=604800)
     branch_url    = create_branch_link(presigned_url, group_id, group_name)
 
+    # QR 코드 생성 및 S3 업로드
     qr_filename = f"{uuid.uuid4().hex}.png"
     local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
     create_qr_with_logo(branch_url, local_qr)
     qr_key = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
+    # Firestore에 메타데이터 저장
     db.collection('uploads').document(group_id).set({
         'group_id':         group_id,
         'group_name':       group_name,
@@ -238,7 +246,8 @@ def upload_video():
         'upload_date':      date_str
     })
 
-    return render_template('success.html',
+    return render_template(
+        'success.html',
         group_id      = group_id,
         main          = main_cat,
         sub           = sub_cat,
@@ -257,16 +266,18 @@ def watch(group_id):
     doc     = doc_ref.get()
     if not doc.exists:
         abort(404)
-    data    = doc.to_dict()
+    data = doc.to_dict()
 
     current_presigned = data.get('presigned_url', '')
     should_renew      = not current_presigned or is_presigned_url_expired(current_presigned, 60)
 
     if should_renew:
         new_presigned_url = generate_presigned_url(data['video_key'], expires_in=604800)
-        new_branch_url    = create_branch_link(new_presigned_url,
-                                               group_id,
-                                               data.get('group_name', ''))
+        new_branch_url    = create_branch_link(
+            new_presigned_url,
+            group_id,
+            data.get('group_name', '')
+        )
         doc_ref.update({
             'presigned_url':     new_presigned_url,
             'branch_url':        new_branch_url,
@@ -278,6 +289,7 @@ def watch(group_id):
 
     return render_template('watch.html', video_url=video_url)
 
+# ==== 서버 실행 ====
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
