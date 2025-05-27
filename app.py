@@ -82,11 +82,12 @@ def generate_presigned_url(key, expires_in=86400):
         ExpiresIn=expires_in
     )
 
-def create_branch_link(deep_url, group_id):
+def create_branch_link(deep_url, group_id, lecture_name):
     """
     Branch.io API 호출하여 딥링크 생성
     deep_url: 실제 동영상 접근용 presigned URL
     group_id: 고유 identifier
+    lecture_name: 사용자가 지정한 강의 이름
     """
     payload = {
         "branch_key": BRANCH_KEY,
@@ -99,9 +100,10 @@ def create_branch_link(deep_url, group_id):
             "$fallback_url": f"{APP_BASE_URL}{group_id}",
             "lecture_url":   deep_url,
             # 커스텀 딥링크 파라미터 추가
-            "screen":    "LectureDetail",
-            "group_id":  group_id,
-            "video_url": deep_url,
+            "screen":        "LectureDetail",
+            "group_id":      group_id,
+            "video_url":     deep_url,
+            "lecture_name":  lecture_name,
         }
     }
     res = requests.post(BRANCH_API_URL, json=payload)
@@ -201,6 +203,7 @@ def upload_video():
     if not file:
         return "파일이 필요합니다.", 400
 
+    # 고유 그룹 ID 및 경로 설정
     group_id  = uuid.uuid4().hex
     date_str  = datetime.now().strftime('%Y%m%d')
     safe_name = re.sub(r'[^\w]', '_', group_name)
@@ -208,20 +211,24 @@ def upload_video():
     ext       = Path(file.filename).suffix or '.mp4'
     video_key = f"{folder}/video{ext}"
 
+    # 파일 임시 저장 및 S3 업로드
     tmp_path = Path(tempfile.gettempdir()) / f"{group_id}{ext}"
     file.save(tmp_path)
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
 
+    # Presigned URL 생성 및 Branch 딥링크 생성 (lecture_name 포함)
     presigned_url = generate_presigned_url(video_key, expires_in=604800)
-    branch_url    = create_branch_link(presigned_url, group_id)
+    branch_url    = create_branch_link(presigned_url, group_id, group_name)
 
+    # QR 코드 생성 및 S3 업로드
     qr_filename = f"{uuid.uuid4().hex}.png"
     local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
     create_qr_with_logo(branch_url, local_qr)
     qr_key = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
+    # Firestore에 메타데이터 저장
     db.collection('uploads').document(group_id).set({
         'group_id':         group_id,
         'group_name':       group_name,
@@ -266,7 +273,7 @@ def watch(group_id):
 
     if should_renew:
         new_presigned_url = generate_presigned_url(data['video_key'], expires_in=604800)
-        new_branch_url    = create_branch_link(new_presigned_url, group_id)
+        new_branch_url    = create_branch_link(new_presigned_url, group_id, data.get('group_name', ''))
         doc_ref.update({
             'presigned_url':     new_presigned_url,
             'branch_url':        new_branch_url,
