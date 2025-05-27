@@ -51,7 +51,7 @@ db = firestore.client()
 # ==== Flask 앱 설정 ====
 app = Flask(__name__)
 app.secret_key                   = SECRET_KEY
-app.config['UPLOAD_FOLDER']      = 'static'  
+app.config['UPLOAD_FOLDER']      = 'static'
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
@@ -97,7 +97,11 @@ def create_branch_link(deep_url, group_id):
             "$ios_url":      deep_url,
             "$android_url":  deep_url,
             "$fallback_url": f"{APP_BASE_URL}{group_id}",
-            "lecture_url":   deep_url
+            "lecture_url":   deep_url,
+            # 커스텀 딥링크 파라미터 추가
+            "screen":    "LectureDetail",
+            "group_id":  group_id,
+            "video_url": deep_url,
         }
     }
     res = requests.post(BRANCH_API_URL, json=payload)
@@ -159,13 +163,8 @@ def login():
 
 @app.route('/upload_form', methods=['GET'])
 def upload_form():
-    """
-    업로드 폼 페이지 (인증 필요)
-    카테고리 목록 및 매핑 정보를 템플릿에 전달
-    """
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
-
     main_cats = ['기계', '공구', '장비']
     sub_map = {
         '기계': ['공작기계', '제조기계', '산업기계'],
@@ -187,14 +186,6 @@ def upload_form():
 
 @app.route('/upload', methods=['POST'])
 def upload_video():
-    """
-    동영상 업로드 처리 핸들러
-    1) 임시 저장 → Wasabi S3 업로드
-    2) 사용자 입력 lecture_time 사용
-    3) Presigned URL 생성 → Branch 딥링크 생성
-    4) QR 코드 생성 및 S3 업로드
-    5) Firestore에 메타데이터 저장
-    """
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
 
@@ -203,7 +194,7 @@ def upload_video():
     main_cat      = request.form.get('main_category','')
     sub_cat       = request.form.get('sub_category','')
     leaf_cat      = request.form.get('sub_sub_category','')
-    lecture_time  = request.form.get('time','')   # 사용자 입력 길이
+    lecture_time  = request.form.get('time','')
     lecture_level = request.form.get('level','')
     lecture_tag   = request.form.get('tag','')
 
@@ -217,24 +208,20 @@ def upload_video():
     ext       = Path(file.filename).suffix or '.mp4'
     video_key = f"{folder}/video{ext}"
 
-    # 시스템 임시 폴더에 저장
     tmp_path = Path(tempfile.gettempdir()) / f"{group_id}{ext}"
     file.save(tmp_path)
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
 
-    # Presigned URL 및 Branch 딥링크 생성
     presigned_url = generate_presigned_url(video_key, expires_in=604800)
     branch_url    = create_branch_link(presigned_url, group_id)
 
-    # QR 코드 생성 및 S3 업로드
     qr_filename = f"{uuid.uuid4().hex}.png"
     local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
     create_qr_with_logo(branch_url, local_qr)
     qr_key = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
-    # Firestore에 메타데이터 저장
     db.collection('uploads').document(group_id).set({
         'group_id':         group_id,
         'group_name':       group_name,
@@ -254,29 +241,25 @@ def upload_video():
 
     return render_template(
         'success.html',
-        group_id     = group_id,
-        main         = main_cat,
-        sub          = sub_cat,
-        leaf         = leaf_cat,
-        time         = lecture_time,
-        level        = lecture_level,
-        tag          = lecture_tag,
-        presigned_url= presigned_url,
-        branch_url   = branch_url,
-        qr_url       = url_for('static', filename=qr_filename)
+        group_id      = group_id,
+        main          = main_cat,
+        sub           = sub_cat,
+        leaf          = leaf_cat,
+        time          = lecture_time,
+        level         = lecture_level,
+        tag           = lecture_tag,
+        presigned_url = presigned_url,
+        branch_url    = branch_url,
+        qr_url        = url_for('static', filename=qr_filename)
     )
 
 @app.route('/watch/<group_id>', methods=['GET'])
 def watch(group_id):
-    """
-    동영상 시청 페이지
-    - Presigned URL이 만료되었으면 재생성 후 업데이트
-    """
     doc_ref = db.collection('uploads').document(group_id)
     doc     = doc_ref.get()
     if not doc.exists:
         abort(404)
-    data    = doc.to_dict()
+    data = doc.to_dict()
 
     current_presigned = data.get('presigned_url', '')
     should_renew      = not current_presigned or is_presigned_url_expired(current_presigned, 60)
