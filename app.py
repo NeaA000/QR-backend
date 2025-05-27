@@ -12,7 +12,6 @@ import boto3
 from boto3.s3.transfer import TransferConfig
 import qrcode
 from PIL import Image
-import requests
 from urllib.parse import urlparse, parse_qs
 
 import firebase_admin
@@ -25,8 +24,6 @@ AWS_SECRET_KEY   = os.environ['AWS_SECRET_KEY']
 REGION_NAME      = os.environ['REGION_NAME']
 BUCKET_NAME      = os.environ['BUCKET_NAME']
 APP_BASE_URL     = os.environ.get('APP_BASE_URL', 'http://localhost:5000/watch/')
-BRANCH_KEY       = os.environ['BRANCH_KEY']
-BRANCH_API_URL   = 'https://api2.branch.io/v1/url'
 SECRET_KEY       = os.environ.get('FLASK_SECRET_KEY', 'supersecret')
 
 # ==== Firebase Admin + Firestore 초기화 ====
@@ -81,36 +78,6 @@ def generate_presigned_url(key, expires_in=86400):
         Params={'Bucket': BUCKET_NAME, 'Key': key},
         ExpiresIn=expires_in
     )
-
-def create_branch_link(deep_url, group_id, lecture_name):
-    """
-    Branch.io API 호출하여 딥링크 생성
-    deep_url: 실제 동영상 접근용 presigned URL
-    group_id: 고유 identifier
-    lecture_name: 사용자가 지정한 강의 이름
-    """
-    payload = {
-        "branch_key": BRANCH_KEY,
-        "campaign":   "lecture_upload",
-        "channel":    "flask_server",
-        "data": {
-            "$desktop_url":  deep_url,
-            "$ios_url":      deep_url,
-            "$android_url":  deep_url,
-            "$fallback_url": f"{APP_BASE_URL}{group_id}",
-            "lecture_url":   deep_url,
-            # 커스텀 딥링크 파라미터 추가
-            "screen":        "LectureDetail",
-            "group_id":      group_id,
-            "video_url":     deep_url,
-            "lecture_name":  lecture_name,
-        }
-    }
-    # ⚡️ 서버 로그에 payload 출력
-    print("🎯 Branch payload data:", payload["data"])
-    res = requests.post(BRANCH_API_URL, json=payload)
-    res.raise_for_status()
-    return res.json().get('url')
 
 def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size_ratio=0.25):
     """
@@ -226,14 +193,15 @@ def upload_video():
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
 
-    # Presigned URL 생성 및 Branch 딥링크 생성
+    # Presigned URL 생성
     presigned_url = generate_presigned_url(video_key, expires_in=604800)
-    branch_url    = create_branch_link(presigned_url, group_id, group_name)
+    # QR 링크는 앱 watch URL만 사용
+    qr_link = f"{APP_BASE_URL}{group_id}"
 
     # QR 생성 및 S3 업로드
     qr_filename = f"{uuid.uuid4().hex}.png"
     local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
-    create_qr_with_logo(branch_url, local_qr)
+    create_qr_with_logo(qr_link, local_qr)
     qr_key      = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
@@ -249,8 +217,7 @@ def upload_video():
         'tag':              lecture_tag,
         'video_key':        video_key,
         'presigned_url':    presigned_url,
-        'branch_url':       branch_url,
-        'branch_updated_at': datetime.utcnow().isoformat(),
+        'qr_link':          qr_link,
         'qr_key':           qr_key,
         'upload_date':      date_str
     })
@@ -265,7 +232,7 @@ def upload_video():
         level         = lecture_level,
         tag           = lecture_tag,
         presigned_url = presigned_url,
-        branch_url    = branch_url,
+        qr_link       = qr_link,
         qr_url        = url_for('static', filename=qr_filename)
     )
 
@@ -283,14 +250,8 @@ def watch(group_id):
     current_presigned = data.get('presigned_url', '')
     if not current_presigned or is_presigned_url_expired(current_presigned, 60):
         new_presigned_url = generate_presigned_url(data['video_key'], expires_in=604800)
-        new_branch_url    = create_branch_link(
-            new_presigned_url,
-            group_id,
-            data.get('group_name', '')
-        )
         doc_ref.update({
             'presigned_url':     new_presigned_url,
-            'branch_url':        new_branch_url,
             'branch_updated_at': datetime.utcnow().isoformat()
         })
         video_url = new_presigned_url
