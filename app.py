@@ -3,7 +3,7 @@ import uuid
 import re
 import tempfile
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from flask import (
     Flask, request, render_template,
     redirect, url_for, session, abort
@@ -13,6 +13,8 @@ from boto3.s3.transfer import TransferConfig
 import qrcode
 from PIL import Image
 from urllib.parse import urlparse, parse_qs
+import requests
+import zipfile
 
 import firebase_admin
 from firebase_admin import credentials, firestore
@@ -116,6 +118,26 @@ def is_presigned_url_expired(url, safety_margin_minutes=60):
     except Exception as e:
         print(f"URL 검사 중 오류: {e}")
         return True
+
+def parse_iso_week(week_str: str):
+    """
+    week_str 형식: "YYYY-Www" (예: "2025-W23")
+    → 해당 ISO 주의 월요일 00:00:00 ~ 일요일 23:59:59 (UTC) 반환
+    """
+    try:
+        year_part, week_part = week_str.split('-W')
+        year = int(year_part)
+        week_num = int(week_part)
+        # Python 3.8+에서 지원: date.fromisocalendar(year, week, weekday)
+        week_start_date = date.fromisocalendar(year, week_num, 1)  # 월요일
+        week_end_date = week_start_date + timedelta(days=6)        # 일요일
+
+        # Firestore 쿼리를 위해 datetime 객체로 변환 (UTC 기준)
+        week_start_dt = datetime.combine(week_start_date, datetime.min.time())
+        week_end_dt = datetime.combine(week_end_date, datetime.max.time())
+        return week_start_dt, week_end_dt
+    except Exception as e:
+        raise ValueError(f"잘못된 week_str 형식: {week_str} ({e})")
 
 # ==== 라우팅 설정 ====
 @app.route('/', methods=['GET'])
@@ -259,6 +281,127 @@ def watch(group_id):
         video_url = current_presigned
 
     return render_template('watch.html', video_url=video_url)
+
+@app.route('/generate_weekly_zip', methods=['GET'])
+def generate_weekly_zip():
+    """
+    관리자가 특정 주차 전체 수료증 ZIP을 요청할 때 호출합니다.
+    - query param: week (예: "2025-W23")
+    - 세션 검사: 로그인된 관리자 세션만 허용
+    """
+    # 1) 인증 체크
+    if not session.get('logged_in'):
+        abort(401)  # Unauthorized
+
+    # 2) 요청 파라미터에서 week 읽기 (형식: "YYYY-Www")
+    week_param = request.args.get('week')
+    if not week_param:
+        # 파라미터가 없으면 오늘 기준 ISO week 계산
+        today = datetime.utcnow().date()
+        y, w, _ = today.isocalendar()
+        week_param = f"{y}-W{str(w).zfill(2)}"
+
+    # S3(Wasabi) 키 경로: full/{week_param}.zip
+    zip_key = f"full/{week_param}.zip"
+
+    # 3) S3에 이미 존재하는 ZIP인지 확인
+    try:
+        s3.head_object(Bucket=BUCKET_NAME, Key=zip_key)
+        # 존재한다면 presigned URL 생성해서 반환
+        presigned = generate_presigned_url(zip_key, expires_in=3600)
+        return {
+            'zipUrl': presigned,
+            'generated': False,
+            'week': week_param
+        }
+    except s3.exceptions.ClientError as e:
+        # NotFound이면 예외 발생, 새로 생성하도록 흐름 넘어감
+        if e.response['Error']['Code'] != '404':
+            abort(500, description=f"S3 오류: {e}")
+
+    # 4) ZIP이 없으므로 Firestore에서 해당 주차 발급된 수료증 조회
+    try:
+        week_start_dt, week_end_dt = parse_iso_week(week_param)
+    except ValueError as ex:
+        abort(400, description=str(ex))
+
+    # Firestore Timestamp 형식으로 변환 (UTC 시간)
+    start_ts = firestore.Timestamp.from_datetime(week_start_dt)
+    end_ts   = firestore.Timestamp.from_datetime(week_end_dt)
+
+    # 컬렉션 그룹 쿼리: 'completedCertificates' 서브컬렉션에서 issuedAt 필드 이용
+    cert_docs = db.collection_group('completedCertificates') \
+                  .where('issuedAt', '>=', start_ts) \
+                  .where('issuedAt', '<=', end_ts) \
+                  .stream()
+
+    # 5) ZIP 파일 생성 (임시 디스크에 쓰기)
+    tmp_zip_path = f"/tmp/{week_param}.zip"
+    with zipfile.ZipFile(tmp_zip_path, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+        found_any = False
+        for cert_doc in cert_docs:
+            data = cert_doc.to_dict()
+            pdf_url = data.get('pdfUrl', '')
+            lecture_title = data.get('lectureTitle') or cert_doc.id
+            user_uid = cert_doc.reference.parent.parent.id  # users/{uid}/completedCertificates/{doc}
+
+            if not pdf_url:
+                continue
+
+            found_any = True
+            # PDF 파일명을 "UID_lectureTitle.pdf" 로 지정 (특수문자 치환)
+            safe_title = re.sub(r'[^\w가-힣_-]', '_', lecture_title)
+            entry_name = f"{user_uid}_{safe_title}.pdf"
+
+            # PDF를 HTTP GET으로 가져와서 ZIP 내부에 쓰기
+            try:
+                resp = requests.get(pdf_url, timeout=30)
+                if resp.status_code == 200:
+                    zf.writestr(entry_name, resp.content)
+                else:
+                    app.logger.warning(f"PDF 다운로드 실패 ({resp.status_code}): {pdf_url}")
+            except Exception as fetch_ex:
+                app.logger.error(f"PDF 다운로드 오류: {pdf_url} -> {fetch_ex}")
+
+        if not found_any:
+            # 해당 주차에 문서가 없으면 임시 ZIP 삭제 후 404 반환
+            zf.close()
+            try:
+                os.remove(tmp_zip_path)
+            except:
+                pass
+            abort(404, description=f"{week_param}에 발급된 수료증이 없습니다.")
+
+    # 6) 생성된 ZIP을 Wasabi(S3)에 업로드
+    try:
+        s3.upload_file(
+            Filename=tmp_zip_path,
+            Bucket=BUCKET_NAME,
+            Key=zip_key,
+            Config=config  # 기존 정의된 TransferConfig 사용
+        )
+    except Exception as upload_ex:
+        app.logger.error(f"ZIP 업로드 실패: {upload_ex}")
+        abort(500, description="ZIP 업로드 중 오류가 발생했습니다.")
+
+    # 임시 ZIP 파일 삭제
+    try:
+        os.remove(tmp_zip_path)
+    except:
+        pass
+
+    # 7) 업로드된 ZIP의 presigned URL 생성 후 반환
+    try:
+        presigned = generate_presigned_url(zip_key, expires_in=3600)
+    except Exception as pre_ex:
+        app.logger.error(f"Presigned URL 생성 실패: {pre_ex}")
+        abort(500, description="Presigned URL 생성 중 오류가 발생했습니다.")
+
+    return {
+        'zipUrl': presigned,
+        'generated': True,
+        'week': week_param
+    }
 
 # ==== 서버 실행 ====
 if __name__ == '__main__':

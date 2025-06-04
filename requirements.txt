@@ -9,3 +9,5 @@ moviepy>=2.2.1
 imageio-ffmpeg
 numpy
 decorator
+firebase-admin
+python-dateutil
