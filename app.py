@@ -17,28 +17,16 @@ import requests
 import zipfile
 
 import firebase_admin
-from firebase_admin import credentials, firestore
-from io import BytesIO
+from firebase_admin import credentials, firestore, storage
 
 # ==== 환경변수 설정 ====
-# 관리자 비밀번호 (기본: changeme)
 ADMIN_PASSWORD   = os.environ.get('ADMIN_PASSWORD', 'changeme')
-
-# Wasabi S3 연동용 키
 AWS_ACCESS_KEY   = os.environ['AWS_ACCESS_KEY']
 AWS_SECRET_KEY   = os.environ['AWS_SECRET_KEY']
 REGION_NAME      = os.environ['REGION_NAME']
 BUCKET_NAME      = os.environ['BUCKET_NAME']
-
-# Branch 딥링크용 키 (v2 REST API)
-BRANCH_KEY       = os.environ.get('BRANCH_KEY', '')
-
-# 웹 fallback을 위해 쓰일 기본 URL
 APP_BASE_URL     = os.environ.get('APP_BASE_URL', 'http://localhost:5000/watch/')
-
-# Flask 세션용 시크릿 키
 SECRET_KEY       = os.environ.get('FLASK_SECRET_KEY', 'supersecret')
-
 
 # ==== Firebase Admin + Firestore 초기화 ====
 if not firebase_admin._apps:
@@ -55,10 +43,13 @@ if not firebase_admin._apps:
         "client_x509_cert_url":        os.environ["client_x509_cert_url"]
     }
     cred = credentials.Certificate(firebase_creds)
-    firebase_admin.initialize_app(cred)
+    # Storage 버킷을 사용하려면 initialize_app에 bucket 지정
+    firebase_admin.initialize_app(cred, {
+        'storageBucket': f"{os.environ['project_id']}.appspot.com"
+    })
 
 db = firestore.client()
-
+bucket = storage.bucket()  # Firebase Storage 버킷
 
 # ==== Flask 앱 설정 ====
 app = Flask(__name__)
@@ -66,7 +57,6 @@ app.secret_key                   = SECRET_KEY
 app.config['UPLOAD_FOLDER']      = 'static'
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
 
 # ==== Wasabi S3 클라이언트 설정 ====
 s3 = boto3.client(
@@ -83,9 +73,7 @@ config = TransferConfig(
     use_threads         = True
 )
 
-
 # ==== 유틸리티 함수들 ====
-
 def generate_presigned_url(key, expires_in=86400):
     """
     S3 객체에 대해 presigned URL 생성
@@ -97,14 +85,9 @@ def generate_presigned_url(key, expires_in=86400):
         ExpiresIn=expires_in
     )
 
-
 def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size_ratio=0.25):
     """
     QR 코드 생성 후 중앙에 로고 삽입
-    - link_url: QR에 인코딩할 URL (Branch 딥링크 혹은 웹 URL)
-    - output_path: 저장할 로컬 경로 (예: 'static/abcd1234.png')
-    - logo_path: QR 중앙에 삽입할 로고 (optional)
-    - size_ratio: 로고가 QR 전체 대비 차지할 비율
     """
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
     qr.add_data(link_url)
@@ -121,12 +104,9 @@ def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size
 
     qr_img.save(output_path)
 
-
 def is_presigned_url_expired(url, safety_margin_minutes=60):
     """
     presigned URL 만료 여부 확인
-    - url: presigned URL
-    - safety_margin_minutes: 안전 여유 시간(분) 이후에도 만료되었는지 체크
     """
     try:
         parsed = urlparse(url)
@@ -142,7 +122,6 @@ def is_presigned_url_expired(url, safety_margin_minutes=60):
     except Exception as e:
         print(f"URL 검사 중 오류: {e}")
         return True
-
 
 def parse_iso_week(week_str: str):
     """
@@ -162,98 +141,11 @@ def parse_iso_week(week_str: str):
     except Exception as e:
         raise ValueError(f"잘못된 week_str 형식: {week_str} ({e})")
 
-
-def create_branch_deep_link(group_id: str) -> str:
-    """
-    Branch REST API를 호출해서 딥링크(URL)를 생성한다.
-    - group_id: Firestore 문서 ID이자 영상 식별자
-    - 반환값: Branch가 발급한 딥링크 URL
-    """
-    if not BRANCH_KEY:
-        raise RuntimeError("환경변수 BRANCH_KEY가 설정되지 않았습니다.")
-
-    ios_uri      = f"myapp://watch/{group_id}"
-    android_uri  = f"myapp://watch/{group_id}"
-    web_fallback = f"{APP_BASE_URL}{group_id}"
-
-    payload = {
-        "branch_key": BRANCH_KEY,
-        "campaign":   "VideoShare",
-        "channel":    "QR",
-        "data": {
-            "group_id":      group_id,
-            "$desktop_url":  web_fallback,
-            "$ios_url":      ios_uri,
-            "$android_url":  android_uri,
-            "$fallback_url": web_fallback
-        }
-    }
-
-    resp = requests.post(
-        "https://api2.branch.io/v1/url",
-        headers={"Content-Type": "application/json"},
-        data=json.dumps(payload),
-        timeout=10
-    )
-    resp.raise_for_status()
-    result = resp.json()
-    return result.get("url", "")
-
-
-def download_file_to_bytes(url: str) -> bytes:
-    """
-    주어진 URL로부터 파일(주로 PDF)을 HTTP GET 요청해서 바이트로 반환
-    """
-    resp = requests.get(url, stream=True, timeout=20)
-    resp.raise_for_status()
-    return resp.content
-
-
-def build_user_certs_zip(uid: str) -> BytesIO:
-    """
-    1) Firestore에서 users/{uid}/completedCertificates 서브컬렉션 조회
-    2) 각 문서의 'pdfUrl'을 모아서, 모두 다운로드 후 ZIP으로 압축해서 메모리(BytesIO)에 담아 리턴
-    """
-    from io import BytesIO
-
-    docs = (
-        db.collection("users")
-        .document(uid)
-        .collection("completedCertificates")
-        .order_by("issuedAt", direction=firestore.Query.ASCENDING)
-        .stream()
-    )
-
-    zip_buffer = BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-        for idx, doc in enumerate(docs):
-            data = doc.to_dict()
-            pdf_url = data.get("pdfUrl", "")
-            lecture_title = data.get("lectureTitle", f"certificate_{idx}")
-            if not pdf_url:
-                continue
-
-            try:
-                file_bytes = download_file_to_bytes(pdf_url)
-            except Exception as e:
-                print(f"PDF 다운로드 실패 (url={pdf_url}): {e}")
-                continue
-
-            safe_name = lecture_title.replace(" ", "_").replace("/", "_")
-            filename = f"{safe_name}_{idx+1}.pdf"
-            zipf.writestr(filename, file_bytes)
-
-    zip_buffer.seek(0)
-    return zip_buffer
-
-
 # ==== 라우팅 설정 ====
-
 @app.route('/', methods=['GET'])
 def login_page():
     """로그인 페이지 렌더링"""
     return render_template('login.html')
-
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -263,7 +155,6 @@ def login():
         session['logged_in'] = True
         return redirect(url_for('upload_form'))
     return render_template('login.html', error="비밀번호가 올바르지 않습니다.")
-
 
 @app.route('/upload_form', methods=['GET'])
 def upload_form():
@@ -292,11 +183,10 @@ def upload_form():
     }
     return render_template('upload_form.html', mains=main_cats, subs=sub_map, leafs=leaf_map)
 
-
 @app.route('/upload', methods=['POST'])
 def upload_video():
     """
-    동영상 업로드 처리 + Branch 딥링크 생성 + QR 코드 생성
+    동영상 업로드 처리
     """
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
@@ -313,7 +203,7 @@ def upload_video():
     if not file:
         return "파일이 필요합니다.", 400
 
-    # 1) 그룹 ID 생성 및 S3 키 구성
+    # 그룹 ID 생성 및 S3 키 구성
     group_id  = uuid.uuid4().hex
     date_str  = datetime.now().strftime('%Y%m%d')
     safe_name = re.sub(r'[^\w]', '_', group_name)
@@ -321,31 +211,25 @@ def upload_video():
     ext       = Path(file.filename).suffix or '.mp4'
     video_key = f"{folder}/video{ext}"
 
-    # 2) 임시 저장 및 S3 업로드
+    # 임시 저장 및 S3 업로드
     tmp_path = Path(tempfile.gettempdir()) / f"{group_id}{ext}"
     file.save(tmp_path)
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
 
-    # 3) Presigned URL 생성 (2주일 유효, 604800초)
+    # Presigned URL 생성
     presigned_url = generate_presigned_url(video_key, expires_in=604800)
+    # QR 링크는 앱 watch URL만 사용
+    qr_link = f"{APP_BASE_URL}{group_id}"
 
-    # 4) Branch 딥링크 생성 → QR 링크에 넣음
-    try:
-        qr_link = create_branch_deep_link(group_id)
-    except Exception as e:
-        app.logger.error(f"Branch 딥링크 생성 실패: {e}")
-        # Branch API 호출 실패 시 fallback으로 웹 URL만 사용
-        qr_link = f"{APP_BASE_URL}{group_id}"
-
-    # 5) QR 생성 및 S3 업로드
+    # QR 생성 및 S3 업로드
     qr_filename = f"{uuid.uuid4().hex}.png"
     local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
     create_qr_with_logo(qr_link, local_qr)
     qr_key      = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
-    # 6) Firestore 메타데이터 저장 (branch_link 필드도 추가)
+    # Firestore 메타데이터 저장
     db.collection('uploads').document(group_id).set({
         'group_id':         group_id,
         'group_name':       group_name,
@@ -357,12 +241,11 @@ def upload_video():
         'tag':              lecture_tag,
         'video_key':        video_key,
         'presigned_url':    presigned_url,
-        'branch_link':      qr_link,
+        'qr_link':          qr_link,
         'qr_key':           qr_key,
         'upload_date':      date_str
     })
 
-    # 7) 업로드 성공 페이지 렌더링 (branch_link, qr_url 등 전달)
     return render_template(
         'success.html',
         group_id      = group_id,
@@ -373,10 +256,9 @@ def upload_video():
         level         = lecture_level,
         tag           = lecture_tag,
         presigned_url = presigned_url,
-        branch_link   = qr_link,
+        qr_link       = qr_link,
         qr_url        = url_for('static', filename=qr_filename)
     )
-
 
 @app.route('/watch/<group_id>', methods=['GET'])
 def watch(group_id):
@@ -402,52 +284,6 @@ def watch(group_id):
 
     return render_template('watch.html', video_url=video_url)
 
-
-@app.route('/api/admin/users/<uid>/certs/zip', methods=['GET'])
-def get_user_certs_zip(uid):
-    """
-    사용자의 전체 수료증을 하나의 ZIP으로 묶어서 Wasabi에 저장하고
-    presigned URL을 반환하거나, 이미 저장된 파일이 있으면 URL만 반환
-    """
-    # (1) 인증/권한 검사 (관리자 전용) 생략 - 실제 서비스에 맞게 구현 필요
-    # token = request.headers.get("Authorization", "").replace("Bearer ", "")
-    # if not is_admin(token): return abort(403)
-
-    # (2) S3에 이미 저장된 ZIP 키 구성
-    zip_key = f"certs/certs_full_{uid}.zip"
-
-    # (3) S3에 해당 키가 이미 존재하는지 확인
-    try:
-        s3.head_object(Bucket=BUCKET_NAME, Key=zip_key)
-        url = generate_presigned_url(zip_key, expires_in=3600 * 24)
-        return jsonify({"url": url, "cached": True})
-    except s3.exceptions.ClientError as e:
-        # 객체가 없는 경우 404 응답 → 새로 생성해야 함
-        if e.response['Error']['Code'] not in ('404', 'NoSuchKey'):
-            abort(500, description=f"S3 오류: {e}")
-
-    # (4) ZIP이 없으면 새로 생성
-    try:
-        from io import BytesIO
-        # 4-1) 사용자의 모든 수료증 PDF를 다운로드 후 ZIP으로 묶기
-        zip_buffer = build_user_certs_zip(uid)
-
-        # 4-2) Wasabi(S3)에 업로드
-        s3.upload_fileobj(
-            zip_buffer,
-            BUCKET_NAME,
-            zip_key,
-            ExtraArgs={'ContentType': 'application/zip'}
-        )
-
-        # 4-3) Presigned URL 생성
-        url = generate_presigned_url(zip_key, expires_in=3600 * 24)
-        return jsonify({"url": url, "cached": False})
-    except Exception as ex:
-        print("ZIP 생성/업로드 중 오류:", ex)
-        abort(500, description="ZIP 생성 중 오류가 발생했습니다.")
-
-
 @app.route('/generate_weekly_zip', methods=['GET'])
 def generate_weekly_zip():
     """
@@ -455,42 +291,53 @@ def generate_weekly_zip():
     - query param: week (예: "2025-W23")
     - 세션 검사: 로그인된 관리자 세션만 허용
     """
+    # 1) 인증 체크
     if not session.get('logged_in'):
-        abort(401)
+        abort(401)  # Unauthorized
 
+    # 2) 요청 파라미터에서 week 읽기 (형식: "YYYY-Www")
     week_param = request.args.get('week')
     if not week_param:
+        # 파라미터가 없으면 오늘 기준 ISO week 계산
         today = datetime.utcnow().date()
         y, w, _ = today.isocalendar()
         week_param = f"{y}-W{str(w).zfill(2)}"
 
+    # S3(Wasabi) 키 경로: full/{week_param}.zip
     zip_key = f"full/{week_param}.zip"
 
+    # 3) S3에 이미 존재하는 ZIP인지 확인
     try:
         s3.head_object(Bucket=BUCKET_NAME, Key=zip_key)
+        # 존재한다면 presigned URL 생성해서 반환
         presigned = generate_presigned_url(zip_key, expires_in=3600)
-        return {
+        return jsonify({
             'zipUrl': presigned,
             'generated': False,
             'week': week_param
-        }
+        })
     except s3.exceptions.ClientError as e:
+        # NotFound이면 예외 발생, 새로 생성하도록 흐름 넘어감
         if e.response['Error']['Code'] != '404':
             abort(500, description=f"S3 오류: {e}")
 
+    # 4) ZIP이 없으므로 Firestore에서 해당 주차 발급된 수료증 조회
     try:
         week_start_dt, week_end_dt = parse_iso_week(week_param)
     except ValueError as ex:
         abort(400, description=str(ex))
 
+    # Firestore Timestamp 형식으로 변환 (UTC 시간)
     start_ts = firestore.Timestamp.from_datetime(week_start_dt)
     end_ts   = firestore.Timestamp.from_datetime(week_end_dt)
 
+    # 컬렉션 그룹 쿼리: 'completedCertificates' 서브컬렉션에서 issuedAt 필드 이용
     cert_docs = db.collection_group('completedCertificates') \
                   .where('issuedAt', '>=', start_ts) \
                   .where('issuedAt', '<=', end_ts) \
                   .stream()
 
+    # 5) ZIP 파일 생성 (임시 디스크에 쓰기)
     tmp_zip_path = f"/tmp/{week_param}.zip"
     with zipfile.ZipFile(tmp_zip_path, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
         found_any = False
@@ -498,15 +345,17 @@ def generate_weekly_zip():
             data = cert_doc.to_dict()
             pdf_url = data.get('pdfUrl', '')
             lecture_title = data.get('lectureTitle') or cert_doc.id
-            user_uid = cert_doc.reference.parent.parent.id
+            user_uid = cert_doc.reference.parent.parent.id  # users/{uid}/completedCertificates/{doc}
 
             if not pdf_url:
                 continue
 
             found_any = True
+            # PDF 파일명을 "UID_lectureTitle.pdf" 로 지정 (특수문자 치환)
             safe_title = re.sub(r'[^\w가-힣_-]', '_', lecture_title)
             entry_name = f"{user_uid}_{safe_title}.pdf"
 
+            # PDF를 HTTP GET으로 가져와서 ZIP 내부에 쓰기
             try:
                 resp = requests.get(pdf_url, timeout=30)
                 if resp.status_code == 200:
@@ -517,6 +366,7 @@ def generate_weekly_zip():
                 app.logger.error(f"PDF 다운로드 오류: {pdf_url} -> {fetch_ex}")
 
         if not found_any:
+            # 해당 주차에 문서가 없으면 임시 ZIP 삭제 후 404 반환
             zf.close()
             try:
                 os.remove(tmp_zip_path)
@@ -524,6 +374,116 @@ def generate_weekly_zip():
                 pass
             abort(404, description=f"{week_param}에 발급된 수료증이 없습니다.")
 
+    # 6) 생성된 ZIP을 Wasabi(S3)에 업로드
+    try:
+        s3.upload_file(
+            Filename=tmp_zip_path,
+            Bucket=BUCKET_NAME,
+            Key=zip_key,
+            Config=config  # 기존 정의된 TransferConfig 사용
+        )
+    except Exception as upload_ex:
+        app.logger.error(f"ZIP 업로드 실패: {upload_ex}")
+        abort(500, description="ZIP 업로드 중 오류가 발생했습니다.")
+
+    # 임시 ZIP 파일 삭제
+    try:
+        os.remove(tmp_zip_path)
+    except:
+        pass
+
+    # 7) 업로드된 ZIP의 presigned URL 생성 후 반환
+    try:
+        presigned = generate_presigned_url(zip_key, expires_in=3600)
+    except Exception as pre_ex:
+        app.logger.error(f"Presigned URL 생성 실패: {pre_ex}")
+        abort(500, description="Presigned URL 생성 중 오류가 발생했습니다.")
+
+    return jsonify({
+        'zipUrl': presigned,
+        'generated': True,
+        'week': week_param
+    })
+
+@app.route('/api/admin/users/certs/zip', methods=['GET'])
+def generate_selected_zip():
+    """
+    Flutter에서 호출하는 엔드포인트:
+    - query param: uids=uid1,uid2,...  (콤마로 구분된 UID 목록)
+                   type=recent|all    ('recent'이면 이번 주차, 'all'이면 전체)
+    - 로그인된 관리자만 허용
+    """
+    if not session.get('logged_in'):
+        abort(401)
+
+    uids_param = request.args.get('uids')
+    type_param = request.args.get('type')
+    if not uids_param or type_param not in ('recent', 'all'):
+        abort(400, "uids와 type(recent 또는 all) 파라미터가 필요합니다.")
+
+    uid_list = uids_param.split(',')
+
+    # 'recent' 타입이면 이번 주차 범위 계산
+    if type_param == 'recent':
+        today = datetime.utcnow().date()
+        y, w, _ = today.isocalendar()
+        week_str = f"{y}-W{str(w).zfill(2)}"
+        try:
+            week_start_dt, week_end_dt = parse_iso_week(week_str)
+        except ValueError as ex:
+            abort(400, description=str(ex))
+
+        start_ts = firestore.Timestamp.from_datetime(week_start_dt)
+        end_ts   = firestore.Timestamp.from_datetime(week_end_dt)
+
+    # 5) ZIP 파일 생성 (임시 디스크에 쓰기)
+    tmp_zip_path = f"/tmp/selected_{uuid.uuid4().hex}.zip"
+    with zipfile.ZipFile(tmp_zip_path, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
+        found_any = False
+
+        for uid in uid_list:
+            coll_ref = db.collection('users').document(uid).collection('completedCertificates')
+            if type_param == 'recent':
+                docs = coll_ref \
+                    .where('issuedAt', '>=', start_ts) \
+                    .where('issuedAt', '<=', end_ts) \
+                    .stream()
+            else:  # 'all'
+                docs = coll_ref.stream()
+
+            for cert_doc in docs:
+                data = cert_doc.to_dict()
+                pdf_url = data.get('pdfUrl', '')
+                lecture_title = data.get('lectureTitle') or cert_doc.id
+
+                if not pdf_url:
+                    continue
+
+                found_any = True
+                # 파일명: "{uid}_{lectureTitle}.pdf"
+                safe_title = re.sub(r'[^\w가-힣_-]', '_', lecture_title)
+                entry_name = f"{uid}_{safe_title}.pdf"
+
+                try:
+                    resp = requests.get(pdf_url, timeout=30)
+                    if resp.status_code == 200:
+                        zf.writestr(entry_name, resp.content)
+                    else:
+                        app.logger.warning(f"PDF 다운로드 실패 ({resp.status_code}): {pdf_url}")
+                except Exception as fetch_ex:
+                    app.logger.error(f"PDF 다운로드 오류: {pdf_url} -> {fetch_ex}")
+
+        if not found_any:
+            # 다운로드할 문서가 없으면 임시 ZIP 삭제 후 404 반환
+            zf.close()
+            try:
+                os.remove(tmp_zip_path)
+            except:
+                pass
+            abort(404, description="선택된 사용자의 수료증이 없습니다.")
+
+    # 6) 생성된 ZIP을 Wasabi(S3)에 업로드
+    zip_key = f"selected/{uuid.uuid4().hex}.zip"
     try:
         s3.upload_file(
             Filename=tmp_zip_path,
@@ -535,23 +495,23 @@ def generate_weekly_zip():
         app.logger.error(f"ZIP 업로드 실패: {upload_ex}")
         abort(500, description="ZIP 업로드 중 오류가 발생했습니다.")
 
+    # 임시 ZIP 파일 삭제
     try:
         os.remove(tmp_zip_path)
     except:
         pass
 
+    # 7) 업로드된 ZIP의 presigned URL 생성 후 반환
     try:
         presigned = generate_presigned_url(zip_key, expires_in=3600)
     except Exception as pre_ex:
         app.logger.error(f"Presigned URL 생성 실패: {pre_ex}")
         abort(500, description="Presigned URL 생성 중 오류가 발생했습니다.")
 
-    return {
+    return jsonify({
         'zipUrl': presigned,
-        'generated': True,
-        'week': week_param
-    }
-
+        'generated': True
+    })
 
 # ==== 서버 실행 ====
 if __name__ == '__main__':
