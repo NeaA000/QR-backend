@@ -18,6 +18,7 @@ import zipfile
 
 import firebase_admin
 from firebase_admin import credentials, firestore
+from io import BytesIO
 
 # ==== 환경변수 설정 ====
 # 관리자 비밀번호 (기본: changeme)
