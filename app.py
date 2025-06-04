@@ -5,8 +5,14 @@ import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta, date
 from flask import (
-    Flask, request, render_template,
-    redirect, url_for, session, abort, jsonify
+    Flask,
+    request,
+    render_template,
+    redirect,
+    url_for,
+    session,
+    abort,
+    jsonify
 )
 import boto3
 from boto3.s3.transfer import TransferConfig
@@ -43,13 +49,13 @@ if not firebase_admin._apps:
         "client_x509_cert_url":        os.environ["client_x509_cert_url"]
     }
     cred = credentials.Certificate(firebase_creds)
-    # Storage 버킷을 사용하려면 initialize_app에 bucket 지정
+    # Firebase Storage를 사용하려면 initialize_app에 storageBucket 지정
     firebase_admin.initialize_app(cred, {
         'storageBucket': f"{os.environ['project_id']}.appspot.com"
     })
 
 db = firestore.client()
-bucket = storage.bucket()  # Firebase Storage 버킷
+bucket = storage.bucket()
 
 # ==== Flask 앱 설정 ====
 app = Flask(__name__)
@@ -74,21 +80,18 @@ config = TransferConfig(
 )
 
 # ==== 유틸리티 함수들 ====
-def generate_presigned_url(key, expires_in=86400):
-    """
-    S3 객체에 대해 presigned URL 생성
-    expires_in: URL 유효 기간(초 단위)
-    """
+def generate_presigned_url(key: str, expires_in: int = 86400) -> str:
+    """S3 객체에 대해 presigned URL 생성 (만료: expires_in 초)"""
     return s3.generate_presigned_url(
         ClientMethod='get_object',
         Params={'Bucket': BUCKET_NAME, 'Key': key},
         ExpiresIn=expires_in
     )
 
-def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size_ratio=0.25):
-    """
-    QR 코드 생성 후 중앙에 로고 삽입
-    """
+def create_qr_with_logo(link_url: str, output_path: str,
+                        logo_path: str = 'static/logo.png',
+                        size_ratio: float = 0.25) -> None:
+    """QR 코드 생성 후 중앙에 로고 삽입"""
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
     qr.add_data(link_url)
     qr.make(fit=True)
@@ -104,10 +107,8 @@ def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size
 
     qr_img.save(output_path)
 
-def is_presigned_url_expired(url, safety_margin_minutes=60):
-    """
-    presigned URL 만료 여부 확인
-    """
+def is_presigned_url_expired(url: str, safety_margin_minutes: int = 60) -> bool:
+    """presigned URL 만료 여부 확인 (만료까지 safety_margin_minutes 이전부터 만료로 간주)"""
     try:
         parsed = urlparse(url)
         query = parse_qs(parsed.query)
@@ -119,8 +120,7 @@ def is_presigned_url_expired(url, safety_margin_minutes=60):
         expiry_time = issued_time + timedelta(seconds=expires_in)
         margin_time = datetime.utcnow() + timedelta(minutes=safety_margin_minutes)
         return margin_time >= expiry_time
-    except Exception as e:
-        print(f"URL 검사 중 오류: {e}")
+    except Exception:
         return True
 
 def parse_iso_week(week_str: str):
@@ -141,10 +141,12 @@ def parse_iso_week(week_str: str):
     except Exception as e:
         raise ValueError(f"잘못된 week_str 형식: {week_str} ({e})")
 
+
 # ==== 라우팅 설정 ====
+
 @app.route('/', methods=['GET'])
 def login_page():
-    """로그인 페이지 렌더링"""
+    """관리자 로그인 페이지 렌더링"""
     return render_template('login.html')
 
 @app.route('/login', methods=['POST'])
@@ -158,9 +160,7 @@ def login():
 
 @app.route('/upload_form', methods=['GET'])
 def upload_form():
-    """
-    업로드 폼 페이지 (인증 필요)
-    """
+    """동영상 업로드 폼 (인증 필요)"""
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
 
@@ -185,9 +185,7 @@ def upload_form():
 
 @app.route('/upload', methods=['POST'])
 def upload_video():
-    """
-    동영상 업로드 처리
-    """
+    """동영상 업로드 처리 → S3 업로드, Firestore에 메타데이터 저장"""
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
 
@@ -203,33 +201,34 @@ def upload_video():
     if not file:
         return "파일이 필요합니다.", 400
 
-    # 그룹 ID 생성 및 S3 키 구성
+    # 1) 그룹 ID 생성 및 S3 키 구성
     group_id  = uuid.uuid4().hex
-    date_str  = datetime.now().strftime('%Y%m%d')
+    date_str  = datetime.utcnow().strftime('%Y%m%d')
     safe_name = re.sub(r'[^\w]', '_', group_name)
     folder    = f"videos/{group_id}_{safe_name}_{date_str}"
     ext       = Path(file.filename).suffix or '.mp4'
     video_key = f"{folder}/video{ext}"
 
-    # 임시 저장 및 S3 업로드
+    # 2) 임시 저장 후 S3 업로드
     tmp_path = Path(tempfile.gettempdir()) / f"{group_id}{ext}"
     file.save(tmp_path)
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
 
-    # Presigned URL 생성
+    # 3) Presigned URL 생성 (2주일 유효)
     presigned_url = generate_presigned_url(video_key, expires_in=604800)
-    # QR 링크는 앱 watch URL만 사용
+
+    # 4) QR 링크 (앱 Watch URL)
     qr_link = f"{APP_BASE_URL}{group_id}"
 
-    # QR 생성 및 S3 업로드
+    # 5) QR 코드 생성 및 S3 업로드
     qr_filename = f"{uuid.uuid4().hex}.png"
     local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
     create_qr_with_logo(qr_link, local_qr)
     qr_key      = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
-    # Firestore 메타데이터 저장
+    # 6) Firestore에 메타데이터 저장
     db.collection('uploads').document(group_id).set({
         'group_id':         group_id,
         'group_name':       group_name,
@@ -264,6 +263,7 @@ def upload_video():
 def watch(group_id):
     """
     동영상 시청 페이지 (Presigned URL 갱신 포함)
+    - Firestore의 presigned_url 만료 확인 후, 새로 발급하여 업데이트
     """
     doc_ref = db.collection('uploads').document(group_id)
     doc     = doc_ref.get()
@@ -273,6 +273,7 @@ def watch(group_id):
 
     current_presigned = data.get('presigned_url', '')
     if not current_presigned or is_presigned_url_expired(current_presigned, 60):
+        # presigned URL이 없거나 곧 만료될 예정이면 재발급
         new_presigned_url = generate_presigned_url(data['video_key'], expires_in=604800)
         doc_ref.update({
             'presigned_url':     new_presigned_url,
@@ -287,29 +288,23 @@ def watch(group_id):
 @app.route('/generate_weekly_zip', methods=['GET'])
 def generate_weekly_zip():
     """
-    관리자가 특정 주차 전체 수료증 ZIP을 요청할 때 호출합니다.
+    관리자가 특정 주차 전체 수료증 ZIP 요청 (Firestore에서 인증된 관리자 이용)
     - query param: week (예: "2025-W23")
-    - 세션 검사: 로그인된 관리자 세션만 허용
     """
-    # 1) 인증 체크
     if not session.get('logged_in'):
-        abort(401)  # Unauthorized
+        abort(401)  # 인증 필요
 
-    # 2) 요청 파라미터에서 week 읽기 (형식: "YYYY-Www")
     week_param = request.args.get('week')
     if not week_param:
-        # 파라미터가 없으면 오늘 기준 ISO week 계산
         today = datetime.utcnow().date()
         y, w, _ = today.isocalendar()
         week_param = f"{y}-W{str(w).zfill(2)}"
 
-    # S3(Wasabi) 키 경로: full/{week_param}.zip
     zip_key = f"full/{week_param}.zip"
 
-    # 3) S3에 이미 존재하는 ZIP인지 확인
+    # 1) 이미 S3(Wasabi)에 ZIP이 존재하는지 확인
     try:
         s3.head_object(Bucket=BUCKET_NAME, Key=zip_key)
-        # 존재한다면 presigned URL 생성해서 반환
         presigned = generate_presigned_url(zip_key, expires_in=3600)
         return jsonify({
             'zipUrl': presigned,
@@ -317,27 +312,23 @@ def generate_weekly_zip():
             'week': week_param
         })
     except s3.exceptions.ClientError as e:
-        # NotFound이면 예외 발생, 새로 생성하도록 흐름 넘어감
         if e.response['Error']['Code'] != '404':
             abort(500, description=f"S3 오류: {e}")
 
-    # 4) ZIP이 없으므로 Firestore에서 해당 주차 발급된 수료증 조회
+    # 2) ZIP이 없으면 Firestore에서 해당 주차 수료증 조회
     try:
         week_start_dt, week_end_dt = parse_iso_week(week_param)
     except ValueError as ex:
         abort(400, description=str(ex))
 
-    # Firestore Timestamp 형식으로 변환 (UTC 시간)
     start_ts = firestore.Timestamp.from_datetime(week_start_dt)
     end_ts   = firestore.Timestamp.from_datetime(week_end_dt)
 
-    # 컬렉션 그룹 쿼리: 'completedCertificates' 서브컬렉션에서 issuedAt 필드 이용
     cert_docs = db.collection_group('completedCertificates') \
                   .where('issuedAt', '>=', start_ts) \
                   .where('issuedAt', '<=', end_ts) \
                   .stream()
 
-    # 5) ZIP 파일 생성 (임시 디스크에 쓰기)
     tmp_zip_path = f"/tmp/{week_param}.zip"
     with zipfile.ZipFile(tmp_zip_path, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
         found_any = False
@@ -351,11 +342,9 @@ def generate_weekly_zip():
                 continue
 
             found_any = True
-            # PDF 파일명을 "UID_lectureTitle.pdf" 로 지정 (특수문자 치환)
             safe_title = re.sub(r'[^\w가-힣_-]', '_', lecture_title)
             entry_name = f"{user_uid}_{safe_title}.pdf"
 
-            # PDF를 HTTP GET으로 가져와서 ZIP 내부에 쓰기
             try:
                 resp = requests.get(pdf_url, timeout=30)
                 if resp.status_code == 200:
@@ -366,7 +355,6 @@ def generate_weekly_zip():
                 app.logger.error(f"PDF 다운로드 오류: {pdf_url} -> {fetch_ex}")
 
         if not found_any:
-            # 해당 주차에 문서가 없으면 임시 ZIP 삭제 후 404 반환
             zf.close()
             try:
                 os.remove(tmp_zip_path)
@@ -374,25 +362,25 @@ def generate_weekly_zip():
                 pass
             abort(404, description=f"{week_param}에 발급된 수료증이 없습니다.")
 
-    # 6) 생성된 ZIP을 Wasabi(S3)에 업로드
+    # 3) 완성된 ZIP을 Wasabi(S3)에 업로드
     try:
         s3.upload_file(
             Filename=tmp_zip_path,
             Bucket=BUCKET_NAME,
             Key=zip_key,
-            Config=config  # 기존 정의된 TransferConfig 사용
+            Config=config
         )
     except Exception as upload_ex:
         app.logger.error(f"ZIP 업로드 실패: {upload_ex}")
         abort(500, description="ZIP 업로드 중 오류가 발생했습니다.")
 
-    # 임시 ZIP 파일 삭제
+    # 임시 ZIP 삭제
     try:
         os.remove(tmp_zip_path)
     except:
         pass
 
-    # 7) 업로드된 ZIP의 presigned URL 생성 후 반환
+    # 4) presigned URL 생성 및 반환
     try:
         presigned = generate_presigned_url(zip_key, expires_in=3600)
     except Exception as pre_ex:
@@ -411,7 +399,7 @@ def generate_selected_zip():
     Flutter에서 호출하는 엔드포인트:
     - query param: uids=uid1,uid2,...  (콤마로 구분된 UID 목록)
                    type=recent|all    ('recent'이면 이번 주차, 'all'이면 전체)
-    - 로그인된 관리자만 허용
+    - 세션 기반 인증 (관리자만)
     """
     if not session.get('logged_in'):
         abort(401)
@@ -419,11 +407,13 @@ def generate_selected_zip():
     uids_param = request.args.get('uids')
     type_param = request.args.get('type')
     if not uids_param or type_param not in ('recent', 'all'):
-        abort(400, "uids와 type(recent 또는 all) 파라미터가 필요합니다.")
+        abort(400, "uids 및 type(recent 또는 all) 파라미터가 필요합니다.")
 
-    uid_list = uids_param.split(',')
+    uid_list = [u.strip() for u in uids_param.split(',') if u.strip()]
+    if not uid_list:
+        abort(400, "유효한 UID 목록이 없습니다.")
 
-    # 'recent' 타입이면 이번 주차 범위 계산
+    # 'recent'인 경우, 이번 주차 범위를 계산
     if type_param == 'recent':
         today = datetime.utcnow().date()
         y, w, _ = today.isocalendar()
@@ -432,11 +422,10 @@ def generate_selected_zip():
             week_start_dt, week_end_dt = parse_iso_week(week_str)
         except ValueError as ex:
             abort(400, description=str(ex))
-
         start_ts = firestore.Timestamp.from_datetime(week_start_dt)
         end_ts   = firestore.Timestamp.from_datetime(week_end_dt)
 
-    # 5) ZIP 파일 생성 (임시 디스크에 쓰기)
+    # ZIP 파일 임시 경로
     tmp_zip_path = f"/tmp/selected_{uuid.uuid4().hex}.zip"
     with zipfile.ZipFile(tmp_zip_path, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
         found_any = False
@@ -460,7 +449,6 @@ def generate_selected_zip():
                     continue
 
                 found_any = True
-                # 파일명: "{uid}_{lectureTitle}.pdf"
                 safe_title = re.sub(r'[^\w가-힣_-]', '_', lecture_title)
                 entry_name = f"{uid}_{safe_title}.pdf"
 
@@ -474,7 +462,6 @@ def generate_selected_zip():
                     app.logger.error(f"PDF 다운로드 오류: {pdf_url} -> {fetch_ex}")
 
         if not found_any:
-            # 다운로드할 문서가 없으면 임시 ZIP 삭제 후 404 반환
             zf.close()
             try:
                 os.remove(tmp_zip_path)
@@ -495,13 +482,13 @@ def generate_selected_zip():
         app.logger.error(f"ZIP 업로드 실패: {upload_ex}")
         abort(500, description="ZIP 업로드 중 오류가 발생했습니다.")
 
-    # 임시 ZIP 파일 삭제
+    # 임시 ZIP 삭제
     try:
         os.remove(tmp_zip_path)
     except:
         pass
 
-    # 7) 업로드된 ZIP의 presigned URL 생성 후 반환
+    # 7) 업로드된 ZIP의 presigned URL 생성
     try:
         presigned = generate_presigned_url(zip_key, expires_in=3600)
     except Exception as pre_ex:
