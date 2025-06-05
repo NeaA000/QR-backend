@@ -22,3 +22,4 @@ openpyxl>=3.0
 python-dateutil
 # 데코레이터 유틸리티 (Flask나 기타 라이브러리에서 종속될 수 있음)
 decorator
+gunicorn
