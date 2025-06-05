@@ -3,17 +3,12 @@
 import os
 import time
 import io
-import sys
 import warnings
 import pandas as pd
 from datetime import datetime, timezone
 from google.cloud import firestore, storage as gcs_storage
 from google.oauth2 import service_account
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DeprecationWarning 무시 (필요할 경우)
-# ─────────────────────────────────────────────────────────────────────────────
-warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1) Firebase/GCS 자격증명 초기화
@@ -34,13 +29,13 @@ if os.getenv("private_key") and os.getenv("client_email"):
     })
     db = firestore.Client(credentials=creds, project=os.getenv("project_id"))
     gcs = gcs_storage.Client(credentials=creds, project=os.getenv("project_id"))
-    print("[INIT] Initialized Firestore and GCS clients with service account.", file=sys.stderr)
+    print("[INIT] Initialized Firestore and GCS clients with service account.")
 else:
     # 로컬 개발 환경: GOOGLE_APPLICATION_CREDENTIALS를 사용하거나
     # 사용자 머신에 설정된 ADC(Application Default Credentials) 사용
     db = firestore.Client()
     gcs = gcs_storage.Client()
-    print("[INIT] Initialized Firestore and GCS clients with default credentials.", file=sys.stderr)
+    print("[INIT] Initialized Firestore and GCS clients with default credentials.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2) GCS 버킷 이름 (워커 전용)
@@ -49,7 +44,7 @@ else:
 BUCKET_NAME     = os.getenv("GCLOUD_STORAGE_BUCKET", f"{os.getenv('project_id')}.appspot.com")
 MASTER_FILENAME = "master_certificates.xlsx"
 bucket          = gcs.bucket(BUCKET_NAME)
-print(f"[INIT] Using GCS bucket: {BUCKET_NAME}", file=sys.stderr)
+print(f"[INIT] Using GCS bucket: {BUCKET_NAME}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3) 아직 엑셀에 업데이트되지 않은 수료증 문서(fetch_unprocessed_certs)
@@ -65,7 +60,7 @@ def fetch_unprocessed_certs():
         # 모든 completedCertificates 문서를 가져옴
         all_certs = list(db.collection_group("completedCertificates").stream())
     except Exception as e:
-        print(f"[ERROR] Failed to perform collection_group query: {e}", file=sys.stderr)
+        print(f"[ERROR] Failed to perform collection_group query: {e}")
         return results
 
     for cert_doc in all_certs:
@@ -82,7 +77,7 @@ def fetch_unprocessed_certs():
 
             results.append((user_uid, cert_id, data))
         except Exception as e:
-            print(f"[ERROR] Failed to parse or filter document {cert_doc.id}: {e}", file=sys.stderr)
+            print(f"[ERROR] Failed to parse or filter document {cert_doc.id}: {e}")
 
     return results
 
@@ -94,7 +89,7 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
     1) Firestore에서 users/{user_uid} 문서를 읽어 사용자 이름, 전화번호, 이메일 획득
     2) cert_info에서 lectureTitle, issuedAt, pdfUrl 읽기
     3) GCS에 master_certificates.xlsx 다운로드 (없으면 새 DataFrame 생성)
-    4) Pandas DataFrame에 새 행 추가 (append 대신 concat 또는 loc 사용)
+    4) Pandas DataFrame에 새 행 추가 (concat 사용)
     5) 수정된 DataFrame을 엑셀 파일로 다시 쓰고 GCS에 덮어쓰기 업로드
     6) Firestore completedCertificates/{cert_id}.update({"excelUpdated": True})
     """
@@ -111,12 +106,12 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
             user_name  = ""
             user_phone = ""
             user_email = ""
-            print(f"[WARN] User document {user_uid} does not exist.", file=sys.stderr)
+            print(f"[WARN] User document {user_uid} does not exist.")
     except Exception as e:
         user_name  = ""
         user_phone = ""
         user_email = ""
-        print(f"[ERROR] Failed to read user document {user_uid}: {e}", file=sys.stderr)
+        print(f"[ERROR] Failed to read user document {user_uid}: {e}")
 
     # --- 2) 수료증 정보에서 강의 제목, 발급 시각, PDF URL 읽어오기 ---
     lecture_title = cert_info.get("lectureTitle", cert_id)
@@ -140,10 +135,10 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
         existing_bytes = master_blob.download_as_bytes()
         excel_buffer   = io.BytesIO(existing_bytes)
         df             = pd.read_excel(excel_buffer, engine="openpyxl")
-        print(f"[DEBUG] Downloaded existing {MASTER_FILENAME} ({len(df)} rows).", file=sys.stderr)
+        print(f"[DEBUG] Downloaded existing {MASTER_FILENAME} ({len(df)} rows).")
     except Exception as e:
         # 파일이 없거나 읽기 실패 시: 빈 DataFrame 생성
-        print(f"[DEBUG] Could not download master Excel, creating new DataFrame: {e}", file=sys.stderr)
+        print(f"[DEBUG] Could not download master Excel, creating new DataFrame: {e}")
         df = pd.DataFrame(columns=[
             '업데이트 날짜',
             '사용자 UID',
@@ -167,17 +162,11 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
         'PDF URL':       pdf_url
     }
 
-    # Pandas 2.x에서 append()가 사라졌으므로 concat 또는 loc 사용
-    # 방법 A: pd.concat
+    # Pandas 2.x에서 append()가 사라졌으므로 concat 사용
     new_df = pd.DataFrame([new_row])
     df = pd.concat([df, new_df], ignore_index=True)
 
-    # ───────────────────────────────────────────────────────────────────────────
-    # 방법 B: loc로 직접 추가(둘 중 하나만 사용하면 됩니다)
-    # df.loc[len(df)] = new_row
-    # ───────────────────────────────────────────────────────────────────────────
-
-    print(f"[DEBUG] Appended new row for user {user_uid}, cert {cert_id}. Total rows now: {len(df)}", file=sys.stderr)
+    print(f"[DEBUG] Appended new row for user {user_uid}, cert {cert_id}. Total rows now: {len(df)}")
 
     # --- 6) DataFrame → 엑셀(BytesIO)로 쓰기 ---
     out_buffer = io.BytesIO()
@@ -185,9 +174,9 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
         with pd.ExcelWriter(out_buffer, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="Certificates")
         out_buffer.seek(0)
-        print(f"[DEBUG] Successfully wrote DataFrame to Excel buffer.", file=sys.stderr)
+        print(f"[DEBUG] Successfully wrote DataFrame to Excel buffer.")
     except Exception as e:
-        print(f"[ERROR] Failed to write DataFrame to Excel buffer: {e}", file=sys.stderr)
+        print(f"[ERROR] Failed to write DataFrame to Excel buffer: {e}")
         return
 
     # --- 7) GCS에 덮어쓰기 업로드 ---
@@ -196,9 +185,9 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
             out_buffer,
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-        print(f"[EXCEL UPDATE] Added cert {cert_id} for user {user_uid} at {updated_date}", file=sys.stderr)
+        print(f"[EXCEL UPDATE] Added cert {cert_id} for user {user_uid} at {updated_date}")
     except Exception as e:
-        print(f"[ERROR] Failed to upload updated Excel to GCS: {e}", file=sys.stderr)
+        print(f"[ERROR] Failed to upload updated Excel to GCS: {e}")
         return
 
     # --- 8) Firestore 문서에 excelUpdated=True로 표시 ---
@@ -206,26 +195,26 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
         cert_ref = db.collection("users").document(user_uid) \
                      .collection("completedCertificates").document(cert_id)
         cert_ref.update({"excelUpdated": True})
-        print(f"[DEBUG] Set excelUpdated=True for {user_uid}/{cert_id}.", file=sys.stderr)
+        print(f"[DEBUG] Set excelUpdated=True for {user_uid}/{cert_id}.")
     except Exception as e:
-        print(f"[ERROR] Failed to update excelUpdated flag for {user_uid}/{cert_id}: {e}", file=sys.stderr)
+        print(f"[ERROR] Failed to update excelUpdated flag for {user_uid}/{cert_id}: {e}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 5) 메인 루프: 주기적으로 폴링 실행(run_poller)
 # ─────────────────────────────────────────────────────────────────────────────
 def run_poller(interval_seconds=60):
-    print(f"[POLL START] Polling Firestore every {interval_seconds} seconds.", file=sys.stderr)
+    print(f"[POLL START] Polling Firestore every {interval_seconds} seconds.")
     while True:
         try:
             unprocessed = fetch_unprocessed_certs()
-            print(f"[POLL] Found {len(unprocessed)} certificates to process.", file=sys.stderr)
+            print(f"[POLL] Found {len(unprocessed)} certificates to process.")
             for user_uid, cert_id, cert_info in unprocessed:
                 try:
                     update_excel_for_cert(user_uid, cert_id, cert_info)
                 except Exception as e:
-                    print(f"[ERROR] Fail to update Excel for {user_uid}/{cert_id}: {e}", file=sys.stderr)
+                    print(f"[ERROR] Fail to update Excel for {user_uid}/{cert_id}: {e}")
         except Exception as e:
-            print(f"[ERROR] Polling loop error: {e}", file=sys.stderr)
+            print(f"[ERROR] Polling loop error: {e}")
         time.sleep(interval_seconds)
 
 if __name__ == "__main__":
