@@ -652,7 +652,6 @@ def generate_selected_zip():
 
 
 if __name__ == "__main__":
-    # Railway가 할당해 주는 포트를 사용하도록 PORT 환경변수를 읽음
     port = int(os.environ.get("PORT", 8080))
-    # 반드시 host="0.0.0.0" 으로 바인딩해야 외부에서 접근 가능
-    app.run(host="0.0.0.0", port=port, debug=True)
+    # 운영 모드로 실행 (디버거 비활성화)
+    app.run(host="0.0.0.0", port=port, debug=False)
