@@ -3,6 +3,7 @@
 import os
 import uuid
 import re
+import io                          # 새로 추가: BytesIO 사용
 import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta, date
@@ -21,6 +22,7 @@ import zipfile
 import jwt  # PyJWT
 from functools import wraps
 
+import pandas as pd                # 새로 추가: Pandas로 엑셀 생성/편집
 import firebase_admin
 from firebase_admin import credentials, firestore, storage
 
@@ -58,7 +60,7 @@ if not firebase_admin._apps:
     })
 
 db     = firestore.client()
-bucket = storage.bucket()
+bucket = storage.bucket()  # Firebase Storage 기본 버킷
 
 # ==== Flask 앱 설정 ====
 app = Flask(__name__)
@@ -194,6 +196,85 @@ def admin_required(f):
 
         return f(*args, **kwargs)
     return decorated
+
+# ===================================================================
+# 새로 추가된 부분: 수료증이 들어올 때마다 Master 엑셀에 자동으로 추가하는 엔드포인트
+# ===================================================================
+@app.route('/add_certificate_to_master', methods=['POST'])
+def add_certificate_to_master():
+    """
+    사용자가 수료증을 발급(저장)할 때 호출.
+    1) Firestore에서 user_uid, cert_id로 수료증 정보 조회
+    2) Firebase Storage에 저장된 master_certificates.xlsx 다운로드 (없으면 새로 생성)
+    3) Pandas로 DataFrame 로드 → 새로운 행 추가
+    4) 수정된 엑셀을 Firebase Storage에 업로드(덮어쓰기)
+    """
+    data = request.get_json() or {}
+    user_uid = data.get('user_uid')
+    cert_id  = data.get('cert_id')
+
+    if not user_uid or not cert_id:
+        return jsonify({'error': 'user_uid와 cert_id가 필요합니다.'}), 400
+
+    # 1) Firestore에서 해당 수료증 문서 조회
+    cert_ref = db.collection('users').document(user_uid).collection('completedCertificates').document(cert_id)
+    cert_doc = cert_ref.get()
+    if not cert_doc.exists:
+        return jsonify({'error': '해당 수료증이 존재하지 않습니다.'}), 404
+
+    cert_info = cert_doc.to_dict()
+    lecture_title = cert_info.get('lectureTitle', cert_id)
+    issued_at     = cert_info.get('issuedAt')  # Firestore Timestamp
+    pdf_url       = cert_info.get('pdfUrl', '')
+
+    # Firestore Timestamp → datetime 변환
+    if hasattr(issued_at, 'to_datetime'):
+        issued_dt = issued_at.to_datetime()
+    else:
+        issued_dt = datetime.utcnow()
+
+    # 2) Firebase Storage에서 master_certificates.xlsx 다운로드 (없으면 빈 DataFrame 생성)
+    master_blob_name = 'master_certificates.xlsx'
+    master_blob = bucket.blob(master_blob_name)
+
+    try:
+        existing_bytes = master_blob.download_as_bytes()
+        excel_buffer   = io.BytesIO(existing_bytes)
+        df_master      = pd.read_excel(excel_buffer, engine='openpyxl')
+    except Exception:
+        # 파일이 없거나 읽기 실패 시: 빈 DataFrame 생성
+        df_master = pd.DataFrame(columns=['User UID', 'Lecture Title', 'Issued At', 'PDF URL'])
+
+    # 3) DataFrame에 새로운 행 추가
+    new_row = {
+        'User UID':      user_uid,
+        'Lecture Title': lecture_title,
+        'Issued At':     issued_dt.strftime('%Y-%m-%d %H:%M:%S'),
+        'PDF URL':       pdf_url
+    }
+    df_master = df_master.append(new_row, ignore_index=True)
+
+    # 4) 수정된 DataFrame을 BytesIO 버퍼에 엑셀로 쓰기
+    out_buffer = io.BytesIO()
+    with pd.ExcelWriter(out_buffer, engine='openpyxl') as writer:
+        df_master.to_excel(writer, index=False, sheet_name='Certificates')
+    out_buffer.seek(0)
+
+    # Firebase Storage에 덮어쓰기
+    try:
+        master_blob.upload_from_file(
+            out_buffer,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    except Exception as e:
+        app.logger.error(f"마스터 엑셀 업로드 실패: {e}")
+        return jsonify({'error': '수정된 엑셀 저장 중 오류가 발생했습니다.'}), 500
+
+    return jsonify({'message': '마스터 엑셀에 수료증 정보가 성공적으로 추가되었습니다.'}), 200
+
+# ===================================================================
+# 여기까지가 새로 추가된 내용
+# ===================================================================
 
 # ==== 라우팅 설정 ====
 
