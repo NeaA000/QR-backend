@@ -1,13 +1,15 @@
-# Firestore 및 GCS 사용을 위한 라이브러리
-google-cloud-firestore>=2.10.0
-google-cloud-storage>=2.10.0
+# Firestore/GCS 접근
+firebase-admin
 
-# Pandas + openpyxl (엑셀 생성/편집용)
-pandas>=1.5.0
-openpyxl>=3.0.0
+# 엑셀(.xlsx) 생성/편집
+pandas>=1.5
+openpyxl>=3.0
 
-# (선택) 타임존/날짜 처리용 라이브러리
-# python-dateutil 등은 pandas 설치 시 이미 포함됨
+# (선택) ISO8601, 날짜 처리 등에 쓰였다면
+python-dateutil
 
-# (선택) 기타 워커가 필요로 하는 라이브러리 추가
-# 예: requests, numpy 등
+# (만약 service_account.from_service_account_info 로 오류가 난다면
+# google-auth 계열을 명시적으로 추가)
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
