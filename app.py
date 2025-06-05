@@ -243,12 +243,9 @@ def upload_video():
 
     # 3) moviepy 를 사용해 동영상 길이 계산
     try:
-        clip = VideoFileClip(str(tmp_path))
-        duration_sec = int(clip.duration)  # 초 단위
-        # 리소스 해제
-        clip.reader.close()
-        if clip.audio:
-            clip.audio.reader.close_proc()
+        with VideoFileClip(str(tmp_path)) as clip:
+            duration_sec = int(clip.duration)  # 초 단위
+        # with 블록을 벗어나면 clip.close()가 자동 호출됩니다.
     except Exception as e:
         duration_sec = 0
         print(f"[WARN] moviepy 로 동영상 길이 가져오기 실패: {e}")
