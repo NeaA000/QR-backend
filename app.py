@@ -306,16 +306,51 @@ def upload_video():
     )
 
 # ===================================================================
-# 새로 추가된 부분: 수료증이 들어올 때마다 Master 엑셀에 자동으로 추가하는 엔드포인트
+# 새로 추가된 부분: 수료증 정보 생성 시 Firestore에 readyForExcel & excelUpdated 플래그 추가
+# (Flutter나 다른 클라이언트가 수료증을 발급할 때 이 엔드포인트 호출)
+# ===================================================================
+@app.route('/create_certificate', methods=['POST'])
+def create_certificate():
+    """
+    클라이언트(Flutter 등)에서 수료증을 발급할 때 호출.
+    1) user_uid, cert_id, lectureTitle, pdfUrl 등을 JSON 바디로 전달
+    2) Firestore에 새 문서를 생성하면서
+       excelUpdated: False, readyForExcel: True 플래그를 함께 설정
+    """
+    data = request.get_json() or {}
+    user_uid      = data.get('user_uid')
+    cert_id       = data.get('cert_id')
+    lecture_title = data.get('lectureTitle', '')
+    pdf_url       = data.get('pdfUrl', '')
+
+    if not user_uid or not cert_id or not pdf_url:
+        return jsonify({'error': 'user_uid, cert_id, lectureTitle, pdfUrl이 필요합니다.'}), 400
+
+    # Firestore Timestamp로 자동 저장
+    cert_ref = db.collection('users').document(user_uid) \
+                 .collection('completedCertificates').document(cert_id)
+    cert_ref.set({
+        'lectureTitle':    lecture_title,
+        'issuedAt':        firestore.SERVER_TIMESTAMP,
+        'pdfUrl':          pdf_url,
+        'excelUpdated':    False,
+        'readyForExcel':   True
+    }, merge=True)
+
+    return jsonify({'message': '수료증이 생성되었습니다. 워커가 엑셀 업데이트 대상에 추가됩니다.'}), 200
+
+# ===================================================================
+# 수료증이 들어올 때마다 Master 엑셀에 자동으로 추가하는 엔드포인트
 # ===================================================================
 @app.route('/add_certificate_to_master', methods=['POST'])
 def add_certificate_to_master():
     """
-    사용자가 수료증을 발급(저장)할 때 호출.
+    사용자가 수료증을 발급(저장)한 후, 필요에 따라 호출.
     1) Firestore에서 user_uid, cert_id로 수료증 정보 조회
     2) Firebase Storage에 저장된 master_certificates.xlsx 다운로드 (없으면 새로 생성)
     3) Pandas로 DataFrame 로드 → 새로운 행 추가
     4) 수정된 엑셀을 Firebase Storage에 업로드(덮어쓰기)
+    5) Firestore 문서에 excelUpdated=True, readyForExcel=False로 업데이트
     """
     data = request.get_json() or {}
     user_uid = data.get('user_uid')
@@ -332,9 +367,13 @@ def add_certificate_to_master():
         return jsonify({'error': '해당 수료증이 존재하지 않습니다.'}), 404
 
     cert_info = cert_doc.to_dict()
+    # PDF URL 필수 확인
+    pdf_url       = cert_info.get('pdfUrl', '')
+    if not pdf_url:
+        return jsonify({'error': 'PDF URL이 없습니다.'}), 400
+
     lecture_title = cert_info.get('lectureTitle', cert_id)
     issued_at     = cert_info.get('issuedAt')  # Firestore Timestamp
-    pdf_url       = cert_info.get('pdfUrl', '')
 
     # Firestore Timestamp → datetime 변환
     if hasattr(issued_at, 'to_datetime'):
@@ -352,13 +391,36 @@ def add_certificate_to_master():
         df_master      = pd.read_excel(excel_buffer, engine='openpyxl')
     except Exception:
         # 파일이 없거나 읽기 실패 시: 빈 DataFrame 생성
-        df_master = pd.DataFrame(columns=['User UID', 'Lecture Title', 'Issued At', 'PDF URL'])
+        df_master = pd.DataFrame(columns=[
+            '업데이트 날짜', '사용자 UID', '전화번호', '이메일',
+            '사용자 이름', '강의 제목', '발급 일시', 'PDF URL'
+        ])
 
     # 3) DataFrame에 새로운 행 추가 (append 대신 concat 사용)
+    # 사용자 프로필 조회 (이름/전화/이메일), 필요시 빈 문자열 처리
+    user_ref = db.collection("users").document(user_uid)
+    user_snapshot = user_ref.get()
+    if user_snapshot.exists:
+        user_data  = user_snapshot.to_dict()
+        user_name  = user_data.get("name", "")
+        user_phone = user_data.get("phone", "")
+        user_email = user_data.get("email", "")
+    else:
+        user_name  = ""
+        user_phone = ""
+        user_email = ""
+
+    updated_date = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    issued_str   = issued_dt.strftime("%Y-%m-%d %H:%M:%S")
+
     new_row = pd.DataFrame([{
-        'User UID':      user_uid,
-        'Lecture Title': lecture_title,
-        'Issued At':     issued_dt.strftime('%Y-%m-%d %H:%M:%S'),
+        '업데이트 날짜': updated_date,
+        '사용자 UID':    user_uid,
+        '전화번호':      user_phone,
+        '이메일':        user_email,
+        '사용자 이름':   user_name,
+        '강의 제목':     lecture_title,
+        '발급 일시':     issued_str,
         'PDF URL':       pdf_url
     }])
     df_master = pd.concat([df_master, new_row], ignore_index=True)
@@ -366,7 +428,7 @@ def add_certificate_to_master():
     # 4) 수정된 DataFrame을 BytesIO 버퍼에 엑셀로 쓰기
     out_buffer = io.BytesIO()
     with pd.ExcelWriter(out_buffer, engine='openpyxl') as writer:
-        df_master.to_excel(writer, index=False, sheet_name='Certificates')
+        df_master.to_excel(writer, index=False, sheet_name="Certificates")
     out_buffer.seek(0)
 
     # Firebase Storage에 덮어쓰기
@@ -378,6 +440,12 @@ def add_certificate_to_master():
     except Exception as e:
         app.logger.error(f"마스터 엑셀 업로드 실패: {e}")
         return jsonify({'error': '수정된 엑셀 저장 중 오류가 발생했습니다.'}), 500
+
+    # 5) Firestore 문서에 excelUpdated=True, readyForExcel=False로 업데이트
+    cert_ref.update({
+        "excelUpdated": True,
+        "readyForExcel": False
+    })
 
     return jsonify({'message': '마스터 엑셀에 수료증 정보가 성공적으로 추가되었습니다.'}), 200
 
