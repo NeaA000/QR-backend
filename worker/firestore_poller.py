@@ -86,11 +86,12 @@ def fetch_unprocessed_certs():
 def update_excel_for_cert(user_uid, cert_id, cert_info):
     """
     1) Firestore에서 users/{user_uid} 문서를 읽어 사용자 이름, 전화번호, 이메일 획득
-    2) cert_info에서 lectureTitle, issuedAt, pdfUrl 읽기
+    2) cert_info에서 lectureTitle, issuedAt, pdfUrl 읽어오기
     3) GCS에 master_certificates.xlsx 다운로드 (없으면 새 DataFrame 생성)
-    4) Pandas DataFrame에 새 행 추가 (concat 사용)
-    5) 수정된 DataFrame을 엑셀 파일로 다시 쓰고 GCS에 덮어쓰기 업로드
-    6) Firestore completedCertificates/{cert_id}.update({"excelUpdated": True})
+    4) Pandas DataFrame에서 불필요한 열('User UID','Lecture Title','Issued At') 삭제
+    5) 새 행 추가 (concat 사용)
+    6) 수정된 DataFrame을 엑셀 파일로 쓰고 GCS에 덮어쓰기 업로드
+    7) Firestore completedCertificates/{cert_id}.update({"excelUpdated": True})
     """
     # --- 1) 사용자 프로필(이름, 전화번호, 이메일) 읽어오기 ---
     user_ref = db.collection("users").document(user_uid)
@@ -149,6 +150,16 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
             'PDF URL'
         ])
 
+    # --- 4.5) 기존 DataFrame에서 불필요한 열 삭제 ---
+    # 이전 버전에서 남아 있을 수 있는 영어 컬럼(header)들을 제거합니다.
+    for col in ['User UID', 'Lecture Title', 'Issued At']:
+        if col in df.columns:
+            df = df.drop(columns=[col])
+    # 만약 'PDF URL' 이 두 번 중복되어 있다면, 필요에 따라 하나만 남길 수도 있습니다.
+    # 예시: if 'PDF URL' 컬럼이 여러 번 있다면 첫 번째를 제외하고 제거하려면:
+    # if df.columns.duplicated().any():
+    #     df = df.loc[:, ~df.columns.duplicated()]
+
     # --- 5) 새 행(row) 생성 및 추가 ---
     new_row = {
         '업데이트 날짜': updated_date,
@@ -171,6 +182,8 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
     out_buffer = io.BytesIO()
     try:
         with pd.ExcelWriter(out_buffer, engine="openpyxl") as writer:
+            # index=False: 인덱스 열을 빼고
+            # header=True (기본값이므로 생략): 컬럼명(한글 컬럼)만 남깁니다
             df.to_excel(writer, index=False, sheet_name="Certificates")
         out_buffer.seek(0)
         print(f"[DEBUG] Successfully wrote DataFrame to Excel buffer.")
