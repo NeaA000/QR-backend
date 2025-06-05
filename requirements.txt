@@ -34,3 +34,5 @@ decorator
 
 # WSGI 서버
 gunicorn
+
+pandas

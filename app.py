@@ -26,8 +26,8 @@ import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore, storage
 
-# ── 새로 추가: moviepy 로 동영상 길이를 가져오기 위한 import ──
-from moviepy.editor import VideoFileClip
+# ── 변경된 부분: video 파일 길이를 가져오기 위한 import (MoviePy 최신 경로) ──
+from moviepy.video.io.VideoFileClip import VideoFileClip
 
 # ==== 환경변수 설정 ====
 ADMIN_EMAIL       = os.environ.get('ADMIN_EMAIL', '')
@@ -223,8 +223,6 @@ def upload_video():
     leaf_cat      = request.form.get('sub_sub_category', '')
 
     # lecture_time 은 더 이상 폼으로 받지 않고, 자동 계산
-    # lecture_time = request.form.get('time', '')
-
     lecture_level = request.form.get('level', '')
     lecture_tag   = request.form.get('tag', '')
 
@@ -356,14 +354,14 @@ def add_certificate_to_master():
         # 파일이 없거나 읽기 실패 시: 빈 DataFrame 생성
         df_master = pd.DataFrame(columns=['User UID', 'Lecture Title', 'Issued At', 'PDF URL'])
 
-    # 3) DataFrame에 새로운 행 추가
-    new_row = {
+    # 3) DataFrame에 새로운 행 추가 (append 대신 concat 사용)
+    new_row = pd.DataFrame([{
         'User UID':      user_uid,
         'Lecture Title': lecture_title,
         'Issued At':     issued_dt.strftime('%Y-%m-%d %H:%M:%S'),
         'PDF URL':       pdf_url
-    }
-    df_master = df_master.append(new_row, ignore_index=True)
+    }])
+    df_master = pd.concat([df_master, new_row], ignore_index=True)
 
     # 4) 수정된 DataFrame을 BytesIO 버퍼에 엑셀로 쓰기
     out_buffer = io.BytesIO()

@@ -4,10 +4,16 @@ import os
 import time
 import io
 import sys
+import warnings
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 from google.cloud import firestore, storage as gcs_storage
 from google.oauth2 import service_account
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DeprecationWarning 무시 (필요할 경우)
+# ─────────────────────────────────────────────────────────────────────────────
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1) Firebase/GCS 자격증명 초기화
@@ -121,11 +127,11 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
     if hasattr(issued_at_ts, "to_datetime"):
         issued_str = issued_at_ts.to_datetime().strftime("%Y-%m-%d %H:%M:%S")
     else:
-        # DeprecationWarning 대응을 위해 timezone-aware 객체를 쓰려면 datetime.now(timezone.utc) 권장
-        issued_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        # DeprecationWarning 대응: timezone-aware 객체를 사용
+        issued_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     # --- 3) 워커가 실제로 엑셀에 행을 추가한 시각(업데이트 날짜) ---
-    updated_date = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    updated_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     master_blob = bucket.blob(MASTER_FILENAME)
 
