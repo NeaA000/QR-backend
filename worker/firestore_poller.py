@@ -89,9 +89,10 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
     2) cert_info에서 lectureTitle, issuedAt, pdfUrl 읽어오기
     3) GCS에 master_certificates.xlsx 다운로드 (없으면 새 DataFrame 생성)
     4) Pandas DataFrame에서 불필요한 열('User UID','Lecture Title','Issued At') 삭제
-    5) 새 행 추가 (concat 사용)
-    6) 수정된 DataFrame을 엑셀 파일로 쓰고 GCS에 덮어쓰기 업로드
-    7) Firestore completedCertificates/{cert_id}.update({"excelUpdated": True})
+    5) 이미 해당 cert_id가 존재하는지 체크 → 중복 시 건너뜀
+    6) 새 행 추가 (concat 사용)
+    7) 수정된 DataFrame을 엑셀 파일로 쓰고 GCS에 덮어쓰기 업로드
+    8) Firestore completedCertificates/{cert_id}.update({"excelUpdated": True})
     """
     # --- 1) 사용자 프로필(이름, 전화번호, 이메일) 읽어오기 ---
     user_ref = db.collection("users").document(user_uid)
@@ -147,20 +148,32 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
             '사용자 이름',
             '강의 제목',
             '발급 일시',
-            'PDF URL'
+            'PDF URL',
+            'Cert ID'
         ])
 
     # --- 4.5) 기존 DataFrame에서 불필요한 열 삭제 ---
-    # 이전 버전에서 남아 있을 수 있는 영어 컬럼(header)들을 제거합니다.
     for col in ['User UID', 'Lecture Title', 'Issued At']:
         if col in df.columns:
             df = df.drop(columns=[col])
-    # 만약 'PDF URL' 이 두 번 중복되어 있다면, 필요에 따라 하나만 남길 수도 있습니다.
-    # 예시: if 'PDF URL' 컬럼이 여러 번 있다면 첫 번째를 제외하고 제거하려면:
-    # if df.columns.duplicated().any():
-    #     df = df.loc[:, ~df.columns.duplicated()]
 
-    # --- 5) 새 행(row) 생성 및 추가 ---
+    # --- 4.6) 'Cert ID' 컬럼 생성/존재 여부 확인 ---
+    if 'Cert ID' not in df.columns:
+        df['Cert ID'] = ""
+
+    # --- 5) 중복 체크: 같은 cert_id가 이미 있는지 확인 ---
+    if cert_id in df['Cert ID'].astype(str).values:
+        print(f"[WARN] cert_id={cert_id} already in Excel. Skipping duplicate.")
+        # excelUpdated 플래그만 True로 마킹하고 리턴
+        try:
+            db.collection("users").document(user_uid) \
+              .collection("completedCertificates").document(cert_id) \
+              .update({"excelUpdated": True})
+        except Exception as e:
+            print(f"[ERROR] Failed to set excelUpdated=True for duplicate {user_uid}/{cert_id}: {e}")
+        return
+
+    # --- 6) 새 행(row) 생성 및 추가 ---
     new_row = {
         '업데이트 날짜': updated_date,
         '사용자 UID':    user_uid,
@@ -169,21 +182,18 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
         '사용자 이름':   user_name,
         '강의 제목':     lecture_title,
         '발급 일시':     issued_str,
-        'PDF URL':       pdf_url
+        'PDF URL':       pdf_url,
+        'Cert ID':       cert_id
     }
 
-    # Pandas 2.x에서 append()가 사라졌으므로 concat 사용
     new_df = pd.DataFrame([new_row])
     df = pd.concat([df, new_df], ignore_index=True)
-
     print(f"[DEBUG] Appended new row for user {user_uid}, cert {cert_id}. Total rows now: {len(df)}")
 
-    # --- 6) DataFrame → 엑셀(BytesIO)로 쓰기 ---
+    # --- 7) DataFrame → 엑셀(BytesIO)로 쓰기 ---
     out_buffer = io.BytesIO()
     try:
         with pd.ExcelWriter(out_buffer, engine="openpyxl") as writer:
-            # index=False: 인덱스 열을 빼고
-            # header=True (기본값이므로 생략): 컬럼명(한글 컬럼)만 남깁니다
             df.to_excel(writer, index=False, sheet_name="Certificates")
         out_buffer.seek(0)
         print(f"[DEBUG] Successfully wrote DataFrame to Excel buffer.")
@@ -191,7 +201,7 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
         print(f"[ERROR] Failed to write DataFrame to Excel buffer: {e}")
         return
 
-    # --- 7) GCS에 덮어쓰기 업로드 ---
+    # --- 8) GCS에 덮어쓰기 업로드 ---
     try:
         master_blob.upload_from_file(
             out_buffer,
@@ -202,7 +212,7 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
         print(f"[ERROR] Failed to upload updated Excel to GCS: {e}")
         return
 
-    # --- 8) Firestore 문서에 excelUpdated=True로 표시 ---
+    # --- 9) Firestore 문서에 excelUpdated=True로 표시 ---
     try:
         cert_ref = db.collection("users").document(user_uid) \
                      .collection("completedCertificates").document(cert_id)
@@ -212,7 +222,7 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
         print(f"[ERROR] Failed to update excelUpdated flag for {user_uid}/{cert_id}: {e}")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5) 메인 루프: 주기적으로 폴링 실행(run_poller)
+# 10) 메인 루프: 주기적으로 폴링 실행(run_poller)
 # ─────────────────────────────────────────────────────────────────────────────
 def run_poller(interval_seconds=60):
     print(f"[POLL START] Polling Firestore every {interval_seconds} seconds.")
