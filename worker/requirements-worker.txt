@@ -1,0 +1,13 @@
+# Firestore 및 GCS 사용을 위한 라이브러리
+google-cloud-firestore>=2.10.0
+google-cloud-storage>=2.10.0
+
+# Pandas + openpyxl (엑셀 생성/편집용)
+pandas>=1.5.0
+openpyxl>=3.0.0
+
+# (선택) 타임존/날짜 처리용 라이브러리
+# python-dateutil 등은 pandas 설치 시 이미 포함됨
+
+# (선택) 기타 워커가 필요로 하는 라이브러리 추가
+# 예: requests, numpy 등
