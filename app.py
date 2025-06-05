@@ -3,7 +3,7 @@
 import os
 import uuid
 import re
-import io                          # 새로 추가: BytesIO 사용
+import io
 import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta, date
@@ -22,23 +22,26 @@ import zipfile
 import jwt  # PyJWT
 from functools import wraps
 
-import pandas as pd                # 새로 추가: Pandas로 엑셀 생성/편집
+import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore, storage
 
-# ==== 환경변수 설정 ====
-ADMIN_EMAIL       = os.environ.get('ADMIN_EMAIL', '')             # 관리자 이메일
-ADMIN_PASSWORD    = os.environ.get('ADMIN_PASSWORD', 'changeme')   # 관리자 비밀번호
-JWT_SECRET        = os.environ.get('JWT_SECRET', 'supersecretjwt') # JWT 서명용 시크릿
-JWT_ALGORITHM     = 'HS256'
-JWT_EXPIRES_HOURS = 4                                              # 토큰 유효시간 (4시간)
+# ── 새로 추가: moviepy 로 동영상 길이를 가져오기 위한 import ──
+from moviepy.editor import VideoFileClip
 
-AWS_ACCESS_KEY   = os.environ['AWS_ACCESS_KEY']
-AWS_SECRET_KEY   = os.environ['AWS_SECRET_KEY']
-REGION_NAME      = os.environ['REGION_NAME']
-BUCKET_NAME      = os.environ['BUCKET_NAME']
-APP_BASE_URL     = os.environ.get('APP_BASE_URL', 'http://localhost:5000/watch/')
-SECRET_KEY       = os.environ.get('FLASK_SECRET_KEY', 'supersecret')
+# ==== 환경변수 설정 ====
+ADMIN_EMAIL       = os.environ.get('ADMIN_EMAIL', '')
+ADMIN_PASSWORD    = os.environ.get('ADMIN_PASSWORD', 'changeme')
+JWT_SECRET        = os.environ.get('JWT_SECRET', 'supersecretjwt')
+JWT_ALGORITHM     = 'HS256'
+JWT_EXPIRES_HOURS = 4
+
+AWS_ACCESS_KEY    = os.environ['AWS_ACCESS_KEY']
+AWS_SECRET_KEY    = os.environ['AWS_SECRET_KEY']
+REGION_NAME       = os.environ['REGION_NAME']
+BUCKET_NAME       = os.environ['BUCKET_NAME']
+APP_BASE_URL      = os.environ.get('APP_BASE_URL', 'http://localhost:5000/watch/')
+SECRET_KEY        = os.environ.get('FLASK_SECRET_KEY', 'supersecret')
 
 # ==== Firebase Admin + Firestore + Storage 초기화 ====
 if not firebase_admin._apps:
@@ -66,7 +69,7 @@ bucket = storage.bucket()  # Firebase Storage 기본 버킷
 app = Flask(__name__)
 app.secret_key                   = SECRET_KEY
 app.config['UPLOAD_FOLDER']      = 'static'
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB 상한
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # ==== Wasabi S3 클라이언트 설정 ====
@@ -198,6 +201,113 @@ def admin_required(f):
     return decorated
 
 # ===================================================================
+# 업로드 핸들러: 동영상 길이를 자동으로 계산하여 lecture_time에 저장
+# ===================================================================
+@app.route('/upload', methods=['POST'])
+def upload_video():
+    """
+    동영상 업로드 처리:
+    1) 클라이언트에서 파일과 기타 메타데이터 수신
+    2) 파일을 임시로 저장 → S3 업로드
+    3) moviepy 로 동영상 길이(초 단위) 계산 → "분:초" 문자열로 변환
+    4) Firestore에 group_id, lecture_time 등을 자동 저장
+    """
+    # 세션 인증(기존 로직)
+    if not session.get('logged_in'):
+        return redirect(url_for('login_page'))
+
+    file          = request.files.get('file')
+    group_name    = request.form.get('group_name', 'default')
+    main_cat      = request.form.get('main_category', '')
+    sub_cat       = request.form.get('sub_category', '')
+    leaf_cat      = request.form.get('sub_sub_category', '')
+
+    # lecture_time 은 더 이상 폼으로 받지 않고, 자동 계산
+    # lecture_time = request.form.get('time', '')
+
+    lecture_level = request.form.get('level', '')
+    lecture_tag   = request.form.get('tag', '')
+
+    if not file:
+        return "파일이 필요합니다.", 400
+
+    # 1) 그룹 ID 생성 및 S3 키 구성
+    group_id = uuid.uuid4().hex
+    date_str = datetime.now().strftime('%Y%m%d')
+    safe_name = re.sub(r'[^\w]', '_', group_name)
+    folder = f"videos/{group_id}_{safe_name}_{date_str}"
+    ext = Path(file.filename).suffix or '.mp4'
+    video_key = f"{folder}/video{ext}"
+
+    # 2) 임시 저장 및 S3 업로드
+    tmp_path = Path(tempfile.gettempdir()) / f"{group_id}{ext}"
+    file.save(tmp_path)
+
+    # 3) moviepy 를 사용해 동영상 길이 계산
+    try:
+        clip = VideoFileClip(str(tmp_path))
+        duration_sec = int(clip.duration)  # 초 단위
+        # 리소스 해제
+        clip.reader.close()
+        if clip.audio:
+            clip.audio.reader.close_proc()
+    except Exception as e:
+        duration_sec = 0
+        print(f"[WARN] moviepy 로 동영상 길이 가져오기 실패: {e}")
+
+    # "분:초" 형식으로 변환 (예: 125초 → "2:05")
+    minutes = duration_sec // 60
+    seconds = duration_sec % 60
+    lecture_time = f"{minutes}:{seconds:02d}"  # 예: "2:05"
+    print(f"[Upload] 계산된 동영상 길이: {lecture_time} (총 {duration_sec}초)")
+
+    # S3 업로드
+    s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
+    tmp_path.unlink(missing_ok=True)
+
+    # 4) Presigned URL 생성 (2주일 유효)
+    presigned_url = generate_presigned_url(video_key, expires_in=604800)
+
+    # 5) QR 링크 생성 및 S3 업로드
+    qr_link = f"{APP_BASE_URL}{group_id}"
+    qr_filename = f"{uuid.uuid4().hex}.png"
+    local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
+    create_qr_with_logo(qr_link, local_qr)
+    qr_key = f"{folder}/{qr_filename}"
+    s3.upload_file(local_qr, BUCKET_NAME, qr_key)
+
+    # 6) Firestore 메타데이터 저장 (lecture_time 필드에 자동 계산값 사용)
+    db.collection('uploads').document(group_id).set({
+        'group_id':         group_id,
+        'group_name':       group_name,
+        'main_category':    main_cat,
+        'sub_category':     sub_cat,
+        'sub_sub_category': leaf_cat,
+        'time':             lecture_time,       # ← 자동 계산된 값
+        'level':            lecture_level,
+        'tag':              lecture_tag,
+        'video_key':        video_key,
+        'presigned_url':    presigned_url,
+        'qr_link':          qr_link,
+        'qr_key':           qr_key,
+        'upload_date':      date_str
+    })
+
+    return render_template(
+        'success.html',
+        group_id      = group_id,
+        main          = main_cat,
+        sub           = sub_cat,
+        leaf          = leaf_cat,
+        time          = lecture_time,    # 뷰에도 자동으로 보여줄 수 있습니다
+        level         = lecture_level,
+        tag           = lecture_tag,
+        presigned_url = presigned_url,
+        qr_link       = qr_link,
+        qr_url        = url_for('static', filename=qr_filename)
+    )
+
+# ===================================================================
 # 새로 추가된 부분: 수료증이 들어올 때마다 Master 엑셀에 자동으로 추가하는 엔드포인트
 # ===================================================================
 @app.route('/add_certificate_to_master', methods=['POST'])
@@ -217,7 +327,8 @@ def add_certificate_to_master():
         return jsonify({'error': 'user_uid와 cert_id가 필요합니다.'}), 400
 
     # 1) Firestore에서 해당 수료증 문서 조회
-    cert_ref = db.collection('users').document(user_uid).collection('completedCertificates').document(cert_id)
+    cert_ref = db.collection('users').document(user_uid) \
+                 .collection('completedCertificates').document(cert_id)
     cert_doc = cert_ref.get()
     if not cert_doc.exists:
         return jsonify({'error': '해당 수료증이 존재하지 않습니다.'}), 404
@@ -272,17 +383,12 @@ def add_certificate_to_master():
 
     return jsonify({'message': '마스터 엑셀에 수료증 정보가 성공적으로 추가되었습니다.'}), 200
 
-# ===================================================================
-# 여기까지가 새로 추가된 내용
-# ===================================================================
-
 # ==== 라우팅 설정 ====
 
 @app.route('/', methods=['GET'])
 def login_page():
     """로그인 페이지 렌더링 (관리자용)"""
     return render_template('login.html')
-
 
 @app.route('/login', methods=['POST'])
 def login():
@@ -297,7 +403,6 @@ def login():
         session['logged_in'] = True
         return redirect(url_for('upload_form'))
     return render_template('login.html', error="이메일 또는 비밀번호가 올바르지 않습니다.")
-
 
 @app.route('/api/admin/login', methods=['POST'])
 def api_admin_login():
@@ -314,7 +419,6 @@ def api_admin_login():
         return jsonify({'token': token}), 200
     else:
         return jsonify({'error': '관리자 인증 실패'}), 401
-
 
 @app.route('/upload_form', methods=['GET'])
 def upload_form():
@@ -343,86 +447,6 @@ def upload_form():
     }
     return render_template('upload_form.html', mains=main_cats, subs=sub_map, leafs=leaf_map)
 
-
-@app.route('/upload', methods=['POST'])
-def upload_video():
-    """
-    동영상 업로드 처리 (기존 세션 기반)
-    """
-    if not session.get('logged_in'):
-        return redirect(url_for('login_page'))
-
-    file          = request.files.get('file')
-    group_name    = request.form.get('group_name', 'default')
-    main_cat      = request.form.get('main_category', '')
-    sub_cat       = request.form.get('sub_category', '')
-    leaf_cat      = request.form.get('sub_sub_category', '')
-    lecture_time  = request.form.get('time', '')
-    lecture_level = request.form.get('level', '')
-    lecture_tag   = request.form.get('tag', '')
-
-    if not file:
-        return "파일이 필요합니다.", 400
-
-    # 그룹 ID 생성 및 S3 키 구성
-    group_id = uuid.uuid4().hex
-    date_str = datetime.now().strftime('%Y%m%d')
-    safe_name = re.sub(r'[^\w]', '_', group_name)
-    folder = f"videos/{group_id}_{safe_name}_{date_str}"
-    ext = Path(file.filename).suffix or '.mp4'
-    video_key = f"{folder}/video{ext}"
-
-    # 임시 저장 및 S3 업로드
-    tmp_path = Path(tempfile.gettempdir()) / f"{group_id}{ext}"
-    file.save(tmp_path)
-    s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
-    tmp_path.unlink(missing_ok=True)
-
-    # Presigned URL 생성 (2주일 유효)
-    presigned_url = generate_presigned_url(video_key, expires_in=604800)
-
-    # QR 링크는 앱 watch URL만 사용
-    qr_link = f"{APP_BASE_URL}{group_id}"
-
-    # QR 생성 및 S3 업로드
-    qr_filename = f"{uuid.uuid4().hex}.png"
-    local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
-    create_qr_with_logo(qr_link, local_qr)
-    qr_key = f"{folder}/{qr_filename}"
-    s3.upload_file(local_qr, BUCKET_NAME, qr_key)
-
-    # Firestore 메타데이터 저장
-    db.collection('uploads').document(group_id).set({
-        'group_id':         group_id,
-        'group_name':       group_name,
-        'main_category':    main_cat,
-        'sub_category':     sub_cat,
-        'sub_sub_category': leaf_cat,
-        'time':             lecture_time,
-        'level':            lecture_level,
-        'tag':              lecture_tag,
-        'video_key':        video_key,
-        'presigned_url':    presigned_url,
-        'qr_link':          qr_link,
-        'qr_key':           qr_key,
-        'upload_date':      date_str
-    })
-
-    return render_template(
-        'success.html',
-        group_id      = group_id,
-        main          = main_cat,
-        sub           = sub_cat,
-        leaf          = leaf_cat,
-        time          = lecture_time,
-        level         = lecture_level,
-        tag           = lecture_tag,
-        presigned_url = presigned_url,
-        qr_link       = qr_link,
-        qr_url        = url_for('static', filename=qr_filename)
-    )
-
-
 @app.route('/watch/<group_id>', methods=['GET'])
 def watch(group_id):
     """
@@ -446,7 +470,6 @@ def watch(group_id):
         video_url = current_presigned
 
     return render_template('watch.html', video_url=video_url)
-
 
 @app.route('/generate_weekly_zip', methods=['GET'])
 @admin_required
@@ -551,7 +574,6 @@ def generate_weekly_zip():
         'week': week_param
     })
 
-
 @app.route('/api/admin/users/certs/zip', methods=['GET'])
 @admin_required
 def generate_selected_zip():
@@ -649,7 +671,6 @@ def generate_selected_zip():
         'zipUrl': presigned,
         'generated': True
     })
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))

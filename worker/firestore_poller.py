@@ -39,6 +39,7 @@ else:
 # ─────────────────────────────────────────────────────────────────────────────
 # 2) GCS 버킷 이름 (워커 전용)
 # ─────────────────────────────────────────────────────────────────────────────
+# 환경 변수 GCLOUD_STORAGE_BUCKET 에서 가져오며, 없으면 <project_id>.appspot.com 으로 대체
 BUCKET_NAME     = os.getenv("GCLOUD_STORAGE_BUCKET", f"{os.getenv('project_id')}.appspot.com")
 MASTER_FILENAME = "master_certificates.xlsx"
 bucket          = gcs.bucket(BUCKET_NAME)
@@ -46,18 +47,16 @@ print(f"[INIT] Using GCS bucket: {BUCKET_NAME}", file=sys.stderr)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3) 아직 엑셀에 업데이트되지 않은 수료증 문서(fetch_unprocessed_certs)
-#    → excelUpdated 필드가 없거나 False인 문서 모두 찾아오기
 # ─────────────────────────────────────────────────────────────────────────────
 def fetch_unprocessed_certs():
     """
-    Collection Group Query를 사용하여 users/{userId}/completedCertificates/{certId} 경로의
-    모든 문서를 가져온 뒤 Python 코드에서 excelUpdated가 True인지 False인지를 구분합니다.
-    excelUpdated가 없으면 디폴트 False로 간주하여 처리 대상에 포함합니다.
-    반환 형식: [(user_uid, cert_id, cert_info_dict), ...]
+    collection_group을 사용해서 users/{uid}/completedCertificates 아래의 모든 문서를 조회.
+    excelUpdated가 False인 문서만 결과 리스트에 추가.
+    반환 값: [(user_uid, cert_id, cert_data_dict), ...]
     """
     results = []
     try:
-        # 1) completedCertificates 하위 컬렉션 아래 모든 문서를 가져온다
+        # 모든 completedCertificates 문서를 가져옴
         all_certs = list(db.collection_group("completedCertificates").stream())
     except Exception as e:
         print(f"[ERROR] Failed to perform collection_group query: {e}", file=sys.stderr)
@@ -66,12 +65,11 @@ def fetch_unprocessed_certs():
     for cert_doc in all_certs:
         try:
             data = cert_doc.to_dict()
-            # 2) excelUpdated 값이 True인 경우에는 이미 처리된 것으로 간주 → 건너뛴다
+            # excelUpdated 필드가 True라면 이미 처리된 문서이므로 건너뜀
             if data.get("excelUpdated", False):
                 continue
 
-            # 3) 문서 경로에서 user_uid 및 cert_id 추출
-            # 예: path == "users/{userId}/completedCertificates/{certId}"
+            # 문서 경로 예시: "users/{userId}/completedCertificates/{certId}"
             path_parts = cert_doc.reference.path.split("/")
             user_uid = path_parts[1]
             cert_id  = path_parts[3]
@@ -79,7 +77,6 @@ def fetch_unprocessed_certs():
             results.append((user_uid, cert_id, data))
         except Exception as e:
             print(f"[ERROR] Failed to parse or filter document {cert_doc.id}: {e}", file=sys.stderr)
-            continue
 
     return results
 
@@ -88,13 +85,12 @@ def fetch_unprocessed_certs():
 # ─────────────────────────────────────────────────────────────────────────────
 def update_excel_for_cert(user_uid, cert_id, cert_info):
     """
-    주어진 사용자 UID와 수료증 ID, 그리고 수료증 정보(dict)를 기반으로:
-    1) 사용자 프로필(이름, 전화번호, 이메일) 조회
-    2) 수료증 정보(lectureTitle, issuedAt, pdfUrl) 읽기
-    3) GCS에서 master_certificates.xlsx 다운로드 (없으면 새로 생성)
-    4) Pandas DataFrame으로 엑셀에 행 추가
-    5) GCS에 엑셀 덮어쓰기 업로드
-    6) Firestore 문서에 excelUpdated=True로 표시
+    1) Firestore에서 users/{user_uid} 문서를 읽어 사용자 이름, 전화번호, 이메일 획득
+    2) cert_info에서 lectureTitle, issuedAt, pdfUrl 읽기
+    3) GCS에 master_certificates.xlsx 다운로드 (없으면 새 DataFrame 생성)
+    4) Pandas DataFrame에 새 행 추가 (append 대신 concat 또는 loc 사용)
+    5) 수정된 DataFrame을 엑셀 파일로 다시 쓰고 GCS에 덮어쓰기 업로드
+    6) Firestore completedCertificates/{cert_id}.update({"excelUpdated": True})
     """
     # --- 1) 사용자 프로필(이름, 전화번호, 이메일) 읽어오기 ---
     user_ref = db.collection("users").document(user_uid)
@@ -125,6 +121,7 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
     if hasattr(issued_at_ts, "to_datetime"):
         issued_str = issued_at_ts.to_datetime().strftime("%Y-%m-%d %H:%M:%S")
     else:
+        # DeprecationWarning 대응을 위해 timezone-aware 객체를 쓰려면 datetime.now(timezone.utc) 권장
         issued_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
     # --- 3) 워커가 실제로 엑셀에 행을 추가한 시각(업데이트 날짜) ---
@@ -163,7 +160,17 @@ def update_excel_for_cert(user_uid, cert_id, cert_info):
         '발급 일시':     issued_str,
         'PDF URL':       pdf_url
     }
-    df = df.append(new_row, ignore_index=True)
+
+    # Pandas 2.x에서 append()가 사라졌으므로 concat 또는 loc 사용
+    # 방법 A: pd.concat
+    new_df = pd.DataFrame([new_row])
+    df = pd.concat([df, new_df], ignore_index=True)
+
+    # ───────────────────────────────────────────────────────────────────────────
+    # 방법 B: loc로 직접 추가(둘 중 하나만 사용하면 됩니다)
+    # df.loc[len(df)] = new_row
+    # ───────────────────────────────────────────────────────────────────────────
+
     print(f"[DEBUG] Appended new row for user {user_uid}, cert {cert_id}. Total rows now: {len(df)}", file=sys.stderr)
 
     # --- 6) DataFrame → 엑셀(BytesIO)로 쓰기 ---
