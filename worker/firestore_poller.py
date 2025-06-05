@@ -46,36 +46,40 @@ print(f"[INIT] Using GCS bucket: {BUCKET_NAME}", file=sys.stderr)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3) 아직 엑셀에 업데이트되지 않은 수료증 문서(fetch_unprocessed_certs)
+#    → excelUpdated 필드가 없거나 False인 문서 모두 찾아오기
 # ─────────────────────────────────────────────────────────────────────────────
 def fetch_unprocessed_certs():
     """
-    Collection Group Query를 사용하여,
-    users/{userId}/completedCertificates/{certId} 경로에 있는 모든 문서 중
-    excelUpdated == False 인 문서를 찾아 리스트로 반환합니다.
+    Collection Group Query를 사용하여 users/{userId}/completedCertificates/{certId} 경로의
+    모든 문서를 가져온 뒤 Python 코드에서 excelUpdated가 True인지 False인지를 구분합니다.
+    excelUpdated가 없으면 디폴트 False로 간주하여 처리 대상에 포함합니다.
     반환 형식: [(user_uid, cert_id, cert_info_dict), ...]
     """
     results = []
     try:
-        # completedCertificates라는 하위 컬렉션을 모두 탐색
-        query = db.collection_group("completedCertificates").where("excelUpdated", "==", False)
-        docs = list(query.stream())
+        # 1) completedCertificates 하위 컬렉션 아래 모든 문서를 가져온다
+        all_certs = list(db.collection_group("completedCertificates").stream())
     except Exception as e:
         print(f"[ERROR] Failed to perform collection_group query: {e}", file=sys.stderr)
         return results
 
-    for cert_doc in docs:
+    for cert_doc in all_certs:
         try:
-            # 문서의 경로: users/{userId}/completedCertificates/{certId}
-            cert_ref = cert_doc.reference
-            # user_uid 추출 (경로에서 세 번째 세그먼트)
-            # ex) cert_ref.path == "users/j6iwz5C.../completedCertificates/abc123"
-            path_parts = cert_ref.path.split("/")
+            data = cert_doc.to_dict()
+            # 2) excelUpdated 값이 True인 경우에는 이미 처리된 것으로 간주 → 건너뛴다
+            if data.get("excelUpdated", False):
+                continue
+
+            # 3) 문서 경로에서 user_uid 및 cert_id 추출
+            # 예: path == "users/{userId}/completedCertificates/{certId}"
+            path_parts = cert_doc.reference.path.split("/")
             user_uid = path_parts[1]
-            cert_id = path_parts[3]
-            cert_info = cert_doc.to_dict()
-            results.append((user_uid, cert_id, cert_info))
+            cert_id  = path_parts[3]
+
+            results.append((user_uid, cert_id, data))
         except Exception as e:
-            print(f"[ERROR] Failed to parse document path or data for {cert_doc.id}: {e}", file=sys.stderr)
+            print(f"[ERROR] Failed to parse or filter document {cert_doc.id}: {e}", file=sys.stderr)
+            continue
 
     return results
 
