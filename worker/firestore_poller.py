@@ -48,26 +48,34 @@ print(f"[INIT] Using GCS bucket: {BUCKET_NAME}", file=sys.stderr)
 # 3) 아직 엑셀에 업데이트되지 않은 수료증 문서(fetch_unprocessed_certs)
 # ─────────────────────────────────────────────────────────────────────────────
 def fetch_unprocessed_certs():
+    """
+    Collection Group Query를 사용하여,
+    users/{userId}/completedCertificates/{certId} 경로에 있는 모든 문서 중
+    excelUpdated == False 인 문서를 찾아 리스트로 반환합니다.
+    반환 형식: [(user_uid, cert_id, cert_info_dict), ...]
+    """
     results = []
     try:
-        users = db.collection("users").stream()
+        # completedCertificates라는 하위 컬렉션을 모두 탐색
+        query = db.collection_group("completedCertificates").where("excelUpdated", "==", False)
+        docs = list(query.stream())
     except Exception as e:
-        print(f"[ERROR] Failed to fetch users collection: {e}", file=sys.stderr)
+        print(f"[ERROR] Failed to perform collection_group query: {e}", file=sys.stderr)
         return results
 
-    for user_doc in users:
-        user_uid = user_doc.id
-        certs_ref = user_doc.reference.collection("completedCertificates")
+    for cert_doc in docs:
         try:
-            # excelUpdated == False인 문서만 가져오기
-            query = certs_ref.where("excelUpdated", "==", False)
-            docs = list(query.stream())
+            # 문서의 경로: users/{userId}/completedCertificates/{certId}
+            cert_ref = cert_doc.reference
+            # user_uid 추출 (경로에서 세 번째 세그먼트)
+            # ex) cert_ref.path == "users/j6iwz5C.../completedCertificates/abc123"
+            path_parts = cert_ref.path.split("/")
+            user_uid = path_parts[1]
+            cert_id = path_parts[3]
+            cert_info = cert_doc.to_dict()
+            results.append((user_uid, cert_id, cert_info))
         except Exception as e:
-            print(f"[ERROR] Failed to query completedCertificates for user {user_uid}: {e}", file=sys.stderr)
-            continue
-
-        for cert_doc in docs:
-            results.append((user_uid, cert_doc.id, cert_doc.to_dict()))
+            print(f"[ERROR] Failed to parse document path or data for {cert_doc.id}: {e}", file=sys.stderr)
 
     return results
 
@@ -75,6 +83,15 @@ def fetch_unprocessed_certs():
 # 4) 수료증 정보를 엑셀에 추가/갱신하는 함수(update_excel_for_cert)
 # ─────────────────────────────────────────────────────────────────────────────
 def update_excel_for_cert(user_uid, cert_id, cert_info):
+    """
+    주어진 사용자 UID와 수료증 ID, 그리고 수료증 정보(dict)를 기반으로:
+    1) 사용자 프로필(이름, 전화번호, 이메일) 조회
+    2) 수료증 정보(lectureTitle, issuedAt, pdfUrl) 읽기
+    3) GCS에서 master_certificates.xlsx 다운로드 (없으면 새로 생성)
+    4) Pandas DataFrame으로 엑셀에 행 추가
+    5) GCS에 엑셀 덮어쓰기 업로드
+    6) Firestore 문서에 excelUpdated=True로 표시
+    """
     # --- 1) 사용자 프로필(이름, 전화번호, 이메일) 읽어오기 ---
     user_ref = db.collection("users").document(user_uid)
     try:
