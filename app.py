@@ -106,24 +106,137 @@ def generate_presigned_url(key, expires_in=86400):
         ExpiresIn=expires_in
     )
 
-def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size_ratio=0.25):
+def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size_ratio=0.25, lecture_title=""):
     """
-    QR 코드 생성 후 중앙에 로고 삽입
+    QR 코드 생성 후 중앙에 로고 삽입, 하단에 강의명 추가
+    
+    Args:
+        link_url: QR 코드에 담을 URL
+        output_path: 저장할 경로
+        logo_path: 로고 이미지 경로
+        size_ratio: 로고 크기 비율
+        lecture_title: 하단에 표시할 강의명
     """
+    from PIL import ImageDraw, ImageFont
+    
+    # QR 코드 생성
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
     qr.add_data(link_url)
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    qr_w, qr_h = qr_img.size
 
+    # 로고 삽입
     if os.path.exists(logo_path):
         logo = Image.open(logo_path)
-        qr_w, qr_h = qr_img.size
         logo_size = int(qr_w * size_ratio)
         logo = logo.resize((logo_size, logo_size), Image.LANCZOS)
         pos = ((qr_w - logo_size) // 2, (qr_h - logo_size) // 2)
         qr_img.paste(logo, pos, mask=(logo if logo.mode == 'RGBA' else None))
 
-    qr_img.save(output_path)
+    # 강의명이 있으면 하단에 텍스트 추가
+    if lecture_title.strip():
+        # 텍스트 영역 높이 계산
+        text_height = int(qr_h * 0.15)  # QR 코드 높이의 15%
+        margin = int(qr_h * 0.02)       # 여백
+        
+        # 새 이미지 생성 (QR 코드 + 텍스트 영역)
+        total_height = qr_h + text_height + margin
+        final_img = Image.new('RGB', (qr_w, total_height), 'white')
+        
+        # QR 코드를 새 이미지에 붙여넣기
+        final_img.paste(qr_img, (0, 0))
+        
+        # 텍스트 그리기 준비
+        draw = ImageDraw.Draw(final_img)
+        
+        # 폰트 설정 (시스템 폰트 사용, 없으면 기본 폰트)
+        try:
+            # 한글 지원 폰트 시도
+            font_paths = [
+                '/System/Library/Fonts/Helvetica.ttc',           # macOS
+                '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', # Linux
+                'C:/Windows/Fonts/malgun.ttf',                   # Windows 맑은고딕
+                'C:/Windows/Fonts/gulim.ttc',                    # Windows 굴림
+                '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf'  # Linux 대체
+            ]
+            
+            font_size = max(12, int(text_height * 0.4))  # 텍스트 높이에 비례
+            font = None
+            
+            for font_path in font_paths:
+                if os.path.exists(font_path):
+                    try:
+                        font = ImageFont.truetype(font_path, font_size)
+                        break
+                    except Exception:
+                        continue
+            
+            # 적절한 폰트를 찾지 못한 경우 기본 폰트 사용
+            if font is None:
+                font = ImageFont.load_default()
+                
+        except Exception as e:
+            app.logger.warning(f"폰트 로드 실패, 기본 폰트 사용: {e}")
+            font = ImageFont.load_default()
+        
+        # 텍스트 길이가 너무 길면 줄바꿈 처리
+        max_chars = 25  # 한 줄 최대 문자 수
+        if len(lecture_title) > max_chars:
+            # 단어 단위로 줄바꿈 시도
+            words = lecture_title.split()
+            lines = []
+            current_line = ""
+            
+            for word in words:
+                test_line = current_line + (" " if current_line else "") + word
+                if len(test_line) <= max_chars:
+                    current_line = test_line
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = word
+            
+            if current_line:
+                lines.append(current_line)
+            
+            # 최대 2줄까지만 표시
+            if len(lines) > 2:
+                lines = lines[:2]
+                lines[1] = lines[1][:max_chars-3] + "..."
+                
+        else:
+            lines = [lecture_title]
+        
+        # 텍스트 그리기
+        text_y_start = qr_h + margin
+        line_height = text_height // len(lines)
+        
+        for i, line in enumerate(lines):
+            # 텍스트 박스 크기 계산
+            try:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                text_width = bbox[2] - bbox[0]
+                text_actual_height = bbox[3] - bbox[1]
+            except AttributeError:
+                # 구버전 Pillow 호환성
+                text_width, text_actual_height = draw.textsize(line, font=font)
+            
+            # 중앙 정렬
+            text_x = (qr_w - text_width) // 2
+            text_y = text_y_start + (i * line_height) + (line_height - text_actual_height) // 2
+            
+            # 텍스트 그리기 (검은색)
+            draw.text((text_x, text_y), line, font=font, fill='black')
+        
+        # 최종 이미지 저장
+        final_img.save(output_path)
+        app.logger.info(f"✅ QR 코드 생성 완료 (강의명 포함): {lecture_title}")
+        
+    else:
+        # 강의명이 없으면 기존 QR 코드만 저장
+        qr_img.save(output_path)
+        app.logger.info(f"✅ QR 코드 생성 완료 (강의명 없음)")
 
 def is_presigned_url_expired(url, safety_margin_minutes=60):
     """
@@ -459,11 +572,19 @@ def upload_video():
     # 4) Presigned URL 생성 (7일 유효)
     presigned_url = generate_presigned_url(video_key, expires_in=604800)
 
-    # 5) QR 링크 생성 및 S3 업로드
+    # 5) QR 링크 생성 및 S3 업로드 (강의명 포함)
     qr_link = f"{APP_BASE_URL}{group_id}"
     qr_filename = f"{uuid.uuid4().hex}.png"
     local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
-    create_qr_with_logo(qr_link, local_qr)
+    
+    # 강의명을 QR 코드에 포함
+    display_title = f"{group_name}"  # 그룹명을 강의명으로 사용
+    if main_cat or sub_cat or leaf_cat:
+        # 카테고리 정보가 있으면 함께 표시
+        categories = [cat for cat in [main_cat, sub_cat, leaf_cat] if cat]
+        display_title = f"{group_name}\n({' > '.join(categories)})"
+    
+    create_qr_with_logo(qr_link, local_qr, lecture_title=display_title)
     qr_key = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
 
