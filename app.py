@@ -26,6 +26,12 @@ import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore, storage
 
+# ── 백그라운드 스케줄러 추가 ──
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+import atexit
+import threading
+
 # ── 변경된 부분: video 파일 길이를 가져오기 위한 import (MoviePy 최신 경로) ──
 from moviepy.video.io.VideoFileClip import VideoFileClip
 
@@ -136,7 +142,7 @@ def is_presigned_url_expired(url, safety_margin_minutes=60):
         margin_time = datetime.utcnow() + timedelta(minutes=safety_margin_minutes)
         return margin_time >= expiry_time
     except Exception as e:
-        print(f"URL 검사 중 오류: {e}")
+        app.logger.warning(f"URL 검사 중 오류: {e}")
         return True
 
 def parse_iso_week(week_str: str):
@@ -185,7 +191,7 @@ def verify_jwt_token(token: str) -> bool:
 
 def admin_required(f):
     """
-    데코레이터: 요청 헤더에 ‘Authorization: Bearer <JWT>’가 있어야 접근 허용
+    데코레이터: 요청 헤더에 'Authorization: Bearer <JWT>'가 있어야 접근 허용
     """
     @wraps(f)
     def decorated(*args, **kwargs):
@@ -199,6 +205,196 @@ def admin_required(f):
 
         return f(*args, **kwargs)
     return decorated
+
+# ===================================================================
+# 새로 추가된 백그라운드 자동 갱신 시스템
+# ===================================================================
+
+def refresh_expiring_urls():
+    """
+    만료 임박한 presigned URL들을 일괄 갱신하는 백그라운드 작업
+    - 2시간(120분) 여유를 두고 미리 갱신
+    """
+    try:
+        app.logger.info("🔄 백그라운드 URL 갱신 작업 시작...")
+        
+        # Firestore에서 모든 업로드 문서 조회
+        uploads_ref = db.collection('uploads')
+        docs = uploads_ref.stream()
+        
+        updated_count = 0
+        total_count = 0
+        
+        for doc in docs:
+            total_count += 1
+            data = doc.to_dict()
+            
+            current_url = data.get('presigned_url', '')
+            video_key = data.get('video_key', '')
+            
+            if not video_key:
+                app.logger.warning(f"⚠️  문서 {doc.id}에 video_key가 없습니다.")
+                continue
+            
+            # URL이 없거나 만료 임박(2시간 여유) 시 갱신
+            if not current_url or is_presigned_url_expired(current_url, safety_margin_minutes=120):
+                try:
+                    # 새 presigned URL 생성 (7일 유효)
+                    new_presigned_url = generate_presigned_url(video_key, expires_in=604800)
+                    
+                    # Firestore 업데이트
+                    doc.reference.update({
+                        'presigned_url': new_presigned_url,
+                        'auto_updated_at': datetime.utcnow().isoformat(),
+                        'auto_update_reason': 'background_refresh'
+                    })
+                    
+                    updated_count += 1
+                    app.logger.info(f"✅ 문서 {doc.id} URL 갱신 완료")
+                    
+                except Exception as update_error:
+                    app.logger.error(f"❌ 문서 {doc.id} URL 갱신 실패: {update_error}")
+        
+        app.logger.info(f"🎉 백그라운드 URL 갱신 완료: {updated_count}/{total_count} 개 갱신됨")
+        
+    except Exception as e:
+        app.logger.error(f"❌ 백그라운드 URL 갱신 작업 중 오류: {e}")
+
+def refresh_qr_presigned_urls():
+    """
+    QR 이미지의 presigned URL도 갱신 (선택사항)
+    """
+    try:
+        app.logger.info("🔄 QR 이미지 URL 갱신 작업 시작...")
+        
+        uploads_ref = db.collection('uploads')
+        docs = uploads_ref.stream()
+        
+        updated_count = 0
+        
+        for doc in docs:
+            data = doc.to_dict()
+            qr_key = data.get('qr_key', '')
+            
+            if not qr_key:
+                continue
+                
+            try:
+                # QR 이미지용 새 presigned URL 생성 (7일 유효)
+                new_qr_url = generate_presigned_url(qr_key, expires_in=604800)
+                
+                doc.reference.update({
+                    'qr_presigned_url': new_qr_url,
+                    'qr_updated_at': datetime.utcnow().isoformat()
+                })
+                
+                updated_count += 1
+                
+            except Exception as qr_error:
+                app.logger.error(f"❌ QR URL 갱신 실패 {doc.id}: {qr_error}")
+        
+        app.logger.info(f"🎉 QR URL 갱신 완료: {updated_count}개")
+        
+    except Exception as e:
+        app.logger.error(f"❌ QR URL 갱신 작업 중 오류: {e}")
+
+# ===================================================================
+# 스케줄러 설정 및 시작
+# ===================================================================
+
+# 스케줄러 인스턴스 생성
+scheduler = BackgroundScheduler(
+    timezone='UTC',
+    job_defaults={
+        'coalesce': True,  # 같은 작업이 중복 실행되지 않도록
+        'max_instances': 1  # 최대 1개 인스턴스만 실행
+    }
+)
+
+def start_background_scheduler():
+    """
+    백그라운드 스케줄러 시작
+    """
+    try:
+        # 1. 동영상 URL 갱신 작업 (3시간마다)
+        scheduler.add_job(
+            func=refresh_expiring_urls,
+            trigger=IntervalTrigger(hours=3),
+            id='refresh_video_urls',
+            name='동영상 URL 자동 갱신',
+            replace_existing=True
+        )
+        
+        # 2. QR 이미지 URL 갱신 작업 (6시간마다)
+        scheduler.add_job(
+            func=refresh_qr_presigned_urls,
+            trigger=IntervalTrigger(hours=6),
+            id='refresh_qr_urls',
+            name='QR 이미지 URL 자동 갱신',
+            replace_existing=True
+        )
+        
+        # 스케줄러 시작
+        scheduler.start()
+        app.logger.info("🚀 백그라운드 URL 자동 갱신 스케줄러가 시작되었습니다.")
+        app.logger.info("   - 동영상 URL: 3시간마다 갱신")
+        app.logger.info("   - QR 이미지 URL: 6시간마다 갱신")
+        
+        # 앱 종료 시 스케줄러도 함께 종료
+        atexit.register(lambda: scheduler.shutdown())
+        
+    except Exception as e:
+        app.logger.error(f"❌ 스케줄러 시작 실패: {e}")
+
+# ===================================================================
+# 수동 갱신 API (관리자용)
+# ===================================================================
+
+@app.route('/api/admin/refresh-urls', methods=['POST'])
+@admin_required
+def manual_refresh_urls():
+    """
+    관리자가 수동으로 URL 갱신을 트리거할 수 있는 엔드포인트
+    """
+    try:
+        # 백그라운드에서 실행하여 응답 지연 방지
+        thread = threading.Thread(target=refresh_expiring_urls)
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({
+            'message': 'URL 갱신 작업이 백그라운드에서 시작되었습니다.',
+            'status': 'started'
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"수동 URL 갱신 실패: {e}")
+        return jsonify({'error': '갱신 작업 시작에 실패했습니다.'}), 500
+
+@app.route('/api/admin/scheduler-status', methods=['GET'])
+@admin_required
+def get_scheduler_status():
+    """
+    스케줄러 상태 확인용 엔드포인트
+    """
+    try:
+        jobs = []
+        for job in scheduler.get_jobs():
+            jobs.append({
+                'id': job.id,
+                'name': job.name,
+                'next_run': job.next_run_time.isoformat() if job.next_run_time else None,
+                'trigger': str(job.trigger)
+            })
+        
+        return jsonify({
+            'running': scheduler.running,
+            'jobs': jobs
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"스케줄러 상태 조회 실패: {e}")
+        return jsonify({'error': '스케줄러 상태를 가져올 수 없습니다.'}), 500
 
 # ===================================================================
 # 업로드 핸들러: 동영상 길이를 자동으로 계산하여 lecture_time에 저장
@@ -248,19 +444,19 @@ def upload_video():
         # with 블록을 벗어나면 clip.close()가 자동 호출됩니다.
     except Exception as e:
         duration_sec = 0
-        print(f"[WARN] moviepy 로 동영상 길이 가져오기 실패: {e}")
+        app.logger.warning(f"moviepy 로 동영상 길이 가져오기 실패: {e}")
 
     # "분:초" 형식으로 변환 (예: 125초 → "2:05")
     minutes = duration_sec // 60
     seconds = duration_sec % 60
     lecture_time = f"{minutes}:{seconds:02d}"  # 예: "2:05"
-    print(f"[Upload] 계산된 동영상 길이: {lecture_time} (총 {duration_sec}초)")
+    app.logger.info(f"계산된 동영상 길이: {lecture_time} (총 {duration_sec}초)")
 
     # S3 업로드
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
 
-    # 4) Presigned URL 생성 (2주일 유효)
+    # 4) Presigned URL 생성 (7일 유효)
     presigned_url = generate_presigned_url(video_key, expires_in=604800)
 
     # 5) QR 링크 생성 및 S3 업로드
@@ -285,7 +481,9 @@ def upload_video():
         'presigned_url':    presigned_url,
         'qr_link':          qr_link,
         'qr_key':           qr_key,
-        'upload_date':      date_str
+        'upload_date':      date_str,
+        'auto_updated_at':  datetime.utcnow().isoformat(),  # 자동 갱신 추적용
+        'auto_update_reason': 'initial_upload'
     })
 
     return render_template(
@@ -643,7 +841,7 @@ def generate_selected_zip():
     """
     Flutter 호출용: 선택한 UID의 수료증 ZIP 생성/조회
     - query param: uids=uid1,uid2,...  (콤마로 구분된 UID 목록)
-                   type=recent|all      (‘recent’: 이번 주차만, ‘all’: 전체)
+                   type=recent|all      ('recent': 이번 주차만, 'all': 전체)
     """
     uids_param = request.args.get('uids')
     type_param = request.args.get('type')
@@ -735,7 +933,14 @@ def generate_selected_zip():
         'generated': True
     })
 
+# ===================================================================
+# 앱 시작 시 스케줄러 자동 실행
+# ===================================================================
+
 if __name__ == "__main__":
+    # 스케줄러 시작
+    start_background_scheduler()
+    
     port = int(os.environ.get("PORT", 8080))
     # 운영 모드로 실행 (디버거 비활성화)
     app.run(host="0.0.0.0", port=port, debug=False)
