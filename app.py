@@ -1819,7 +1819,411 @@ def initialize_railway_environment():
     except Exception as e:
         app.logger.error(f"❌ Railway 환경 초기화 실패: {e}")
         return False
+# Flutter 앱에서 필요한 누락된 API 엔드포인트들
+# 기존 app.py에 추가해야 할 엔드포인트들
 
+# ===================================================================
+# 1. 다국어 비디오 검색 API (Flutter 검색 기능용)
+# ===================================================================
+
+@app.route('/api/videos/search', methods=['GET'])
+def search_videos_multilingual():
+    """
+    Flutter 앱의 검색 기능용 다국어 비디오 검색 API
+    Query params:
+    - q: 검색어
+    - lang: 언어 코드 (기본값: ko)
+    - limit: 결과 개수 제한 (기본값: 50)
+    """
+    query = request.args.get('q', '').strip()
+    lang_code = request.args.get('lang', 'ko')
+    limit = int(request.args.get('limit', 50))
+    
+    if not query:
+        return jsonify({'videos': [], 'total': 0, 'query': query})
+    
+    if lang_code not in SUPPORTED_LANGUAGES:
+        lang_code = 'ko'
+    
+    try:
+        # Firestore에서 모든 업로드 문서 조회
+        uploads_ref = db.collection('uploads')
+        docs = uploads_ref.stream()
+        
+        matched_videos = []
+        
+        for doc in docs:
+            root_data = doc.to_dict()
+            group_id = doc.id
+            
+            # 번역 문서 조회
+            translation_doc = doc.reference.collection('translations').document(lang_code).get()
+            
+            # 검색 매칭 확인
+            is_match = False
+            display_title = root_data.get('group_name', '')
+            display_main_category = root_data.get('main_category', '')
+            display_sub_category = root_data.get('sub_category', '')
+            display_sub_sub_category = root_data.get('sub_sub_category', '')
+            
+            if translation_doc.exists:
+                translation_data = translation_doc.to_dict()
+                display_title = translation_data.get('title', display_title)
+                display_main_category = translation_data.get('main_category', display_main_category)
+                display_sub_category = translation_data.get('sub_category', display_sub_category)
+                display_sub_sub_category = translation_data.get('sub_sub_category', display_sub_sub_category)
+            
+            # 제목, 카테고리에서 검색
+            search_fields = [display_title, display_main_category, display_sub_category, display_sub_sub_category]
+            for field in search_fields:
+                if query.lower() in field.lower():
+                    is_match = True
+                    break
+            
+            if is_match:
+                # URL 갱신 확인
+                current_presigned = root_data.get('presigned_url', '')
+                if not current_presigned or is_presigned_url_expired(current_presigned, 60):
+                    new_presigned_url = generate_presigned_url(root_data['video_key'], expires_in=604800)
+                    doc.reference.update({
+                        'presigned_url': new_presigned_url,
+                        'updated_at': datetime.utcnow().isoformat()
+                    })
+                    video_url = new_presigned_url
+                else:
+                    video_url = current_presigned
+                
+                matched_videos.append({
+                    'groupId': group_id,
+                    'title': display_title,
+                    'main_category': display_main_category,
+                    'sub_category': display_sub_category,
+                    'sub_sub_category': display_sub_sub_category,
+                    'level': root_data.get('level', ''),
+                    'time': root_data.get('time', '0:00'),
+                    'tag': root_data.get('tag', ''),
+                    'upload_date': root_data.get('upload_date', ''),
+                    'video_url': video_url,
+                    'qr_url': root_data.get('qr_presigned_url', ''),
+                    'language': lang_code
+                })
+        
+        # 제한된 결과 반환
+        limited_results = matched_videos[:limit]
+        
+        return jsonify({
+            'videos': limited_results,
+            'total': len(limited_results),
+            'query': query,
+            'language': lang_code,
+            'language_name': SUPPORTED_LANGUAGES[lang_code]
+        })
+        
+    except Exception as e:
+        app.logger.error(f"비디오 검색 실패: {e}")
+        return jsonify({'error': '검색 중 오류가 발생했습니다.'}), 500
+
+# ===================================================================
+# 2. 카테고리별 비디오 조회 API (Flutter 카테고리 선택용)
+# ===================================================================
+
+@app.route('/api/videos/category/<category>', methods=['GET'])
+def get_videos_by_category(category):
+    """
+    특정 카테고리의 비디오 목록 조회 (Flutter LectureListScreen용)
+    Path params:
+    - category: 카테고리명
+    Query params:
+    - lang: 언어 코드 (기본값: ko)
+    """
+    lang_code = request.args.get('lang', 'ko')
+    
+    if lang_code not in SUPPORTED_LANGUAGES:
+        lang_code = 'ko'
+    
+    try:
+        # 모든 업로드 문서 조회
+        uploads_ref = db.collection('uploads')
+        docs = uploads_ref.stream()
+        
+        category_videos = []
+        
+        for doc in docs:
+            root_data = doc.to_dict()
+            group_id = doc.id
+            
+            # 번역 문서 조회
+            translation_doc = doc.reference.collection('translations').document(lang_code).get()
+            
+            # 카테고리 매칭 확인
+            check_categories = [
+                root_data.get('main_category', ''),
+                root_data.get('sub_category', ''),
+                root_data.get('sub_sub_category', '')
+            ]
+            
+            if translation_doc.exists:
+                translation_data = translation_doc.to_dict()
+                check_categories.extend([
+                    translation_data.get('main_category', ''),
+                    translation_data.get('sub_category', ''),
+                    translation_data.get('sub_sub_category', '')
+                ])
+            
+            # 카테고리 매칭
+            if any(category.lower() in cat.lower() for cat in check_categories if cat):
+                # URL 갱신
+                current_presigned = root_data.get('presigned_url', '')
+                if not current_presigned or is_presigned_url_expired(current_presigned, 60):
+                    new_presigned_url = generate_presigned_url(root_data['video_key'], expires_in=604800)
+                    doc.reference.update({
+                        'presigned_url': new_presigned_url,
+                        'updated_at': datetime.utcnow().isoformat()
+                    })
+                    video_url = new_presigned_url
+                else:
+                    video_url = current_presigned
+                
+                # 번역된 데이터 사용
+                display_data = get_video_with_translation(group_id, lang_code)
+                if display_data:
+                    category_videos.append({
+                        'groupId': group_id,
+                        'title': display_data['display_title'],
+                        'main_category': display_data['display_main_category'],
+                        'sub_category': display_data['display_sub_category'],
+                        'sub_sub_category': display_data['display_sub_sub_category'],
+                        'level': display_data.get('level', ''),
+                        'time': display_data.get('time', '0:00'),
+                        'tag': display_data.get('tag', ''),
+                        'upload_date': display_data.get('upload_date', ''),
+                        'video_url': video_url,
+                        'qr_url': display_data.get('qr_presigned_url', ''),
+                        'language': lang_code
+                    })
+        
+        return jsonify({
+            'videos': category_videos,
+            'category': category,
+            'total': len(category_videos),
+            'language': lang_code,
+            'language_name': SUPPORTED_LANGUAGES[lang_code]
+        })
+        
+    except Exception as e:
+        app.logger.error(f"카테고리별 비디오 조회 실패: {e}")
+        return jsonify({'error': '비디오 조회 중 오류가 발생했습니다.'}), 500
+
+# ===================================================================
+# 3. 사용자 강의 신청/조회 API (Flutter 강의 신청 기능용)
+# ===================================================================
+
+@app.route('/api/user/lectures', methods=['GET'])
+def get_user_lectures():
+    """
+    현재 사용자가 신청한 강의 목록 조회
+    Headers: Authorization: Bearer <firebase_id_token>
+    """
+    try:
+        # Firebase ID 토큰 검증 (실제 구현 시 필요)
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return jsonify({'error': '인증이 필요합니다.'}), 401
+        
+        # 여기서는 간단히 uid를 받는다고 가정
+        uid = request.args.get('uid')
+        if not uid:
+            return jsonify({'error': 'UID가 필요합니다.'}), 400
+        
+        # 사용자 문서에서 availableLectures 조회
+        user_doc = db.collection('users').document(uid).get()
+        
+        if not user_doc.exists:
+            return jsonify({'lectures': [], 'total': 0})
+        
+        user_data = user_doc.to_dict()
+        available_lectures = user_data.get('availableLectures', [])
+        
+        # 각 강의의 상세 정보 조회
+        lecture_details = []
+        lang_code = request.args.get('lang', 'ko')
+        
+        for lecture_id in available_lectures:
+            lecture_data = get_video_with_translation(lecture_id, lang_code)
+            if lecture_data:
+                lecture_details.append({
+                    'groupId': lecture_id,
+                    'title': lecture_data['display_title'],
+                    'main_category': lecture_data['display_main_category'],
+                    'sub_category': lecture_data['display_sub_category'],
+                    'level': lecture_data.get('level', ''),
+                    'time': lecture_data.get('time', '0:00'),
+                    'video_url': lecture_data.get('presigned_url', ''),
+                    'qr_url': lecture_data.get('qr_presigned_url', ''),
+                })
+        
+        return jsonify({
+            'lectures': lecture_details,
+            'total': len(lecture_details),
+            'user_uid': uid,
+            'language': lang_code
+        })
+        
+    except Exception as e:
+        app.logger.error(f"사용자 강의 조회 실패: {e}")
+        return jsonify({'error': '강의 조회 중 오류가 발생했습니다.'}), 500
+
+@app.route('/api/user/lectures', methods=['POST'])
+def apply_for_lectures():
+    """
+    사용자 강의 신청 API
+    Body: { "uid": "user_uid", "lecture_ids": ["group_id1", "group_id2"] }
+    """
+    try:
+        data = request.get_json() or {}
+        uid = data.get('uid')
+        lecture_ids = data.get('lecture_ids', [])
+        
+        if not uid or not lecture_ids:
+            return jsonify({'error': 'UID와 강의 ID가 필요합니다.'}), 400
+        
+        # Firestore에 강의 신청 정보 저장
+        user_ref = db.collection('users').document(uid)
+        user_ref.set({
+            'availableLectures': firestore.ArrayUnion(lecture_ids),
+            'lastUpdated': firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+        
+        return jsonify({
+            'message': '강의 신청이 완료되었습니다.',
+            'applied_lectures': lecture_ids,
+            'user_uid': uid
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"강의 신청 실패: {e}")
+        return jsonify({'error': '강의 신청 중 오류가 발생했습니다.'}), 500
+
+# ===================================================================
+# 4. 다국어 카테고리 목록 API (Flutter 카테고리 구조용)
+# ===================================================================
+
+@app.route('/api/categories', methods=['GET'])
+def get_categories():
+    """
+    다국어 카테고리 구조 반환 (Flutter 앱의 하드코딩 대신 사용)
+    Query params:
+    - lang: 언어 코드 (기본값: ko)
+    """
+    lang_code = request.args.get('lang', 'ko')
+    
+    if lang_code not in SUPPORTED_LANGUAGES:
+        lang_code = 'ko'
+    
+    # 각 언어별 카테고리 매핑 (Flutter 앱과 동일한 구조)
+    categories_ko = {
+        'main_categories': ['전체', '기계', '공구', '장비'],
+        'sub_categories': {
+            '전체': ['건설기계', '공작기계', '산업기계', '제조기계', '수공구', '전동공구', '절삭공구', '측정공구', '안전장비', '운송장비'],
+            '기계': ['건설기계', '공작기계', '산업기계', '제조기계'],
+            '공구': ['수공구', '전동공구', '절삭공구', '측정공구'],
+            '장비': ['안전장비', '운송장비']
+        },
+        'leaf_categories': {
+            '건설기계': ['불도저', '크레인', '굴착기'],
+            '공작기계': ['CNC 선반', '절삭기', '연삭기'],
+            '산업기계': ['유압 프레스', '컨베이어 시스템', '굴착기'],
+            '제조기계': ['사출 성형기', '프레스기', '열성형기'],
+            '수공구': ['드릴', '해머', '플라이어'],
+            '전동공구': ['그라인더', '전동 톱', '해머드릴'],
+            '절삭공구': ['커터', '플라즈마 노즐', '드릴 비트'],
+            '측정공구': ['캘리퍼스', '하이트 게이지', '마이크로미터'],
+            '안전장비': ['헬멧', '방진 마스크', '낙하 방지벨트', '안전모', '안전화', '보호안경', '귀마개', '보호장갑', '호흡 보호구'],
+            '운송장비': ['리프팅 장비', '체인 블록', '호이스트']
+        }
+    }
+    
+    # 다른 언어로 번역된 카테고리도 추가 가능
+    # 현재는 한국어만 제공, 필요시 번역 추가
+    
+    return jsonify({
+        'categories': categories_ko,
+        'language': lang_code,
+        'language_name': SUPPORTED_LANGUAGES[lang_code],
+        'supported_languages': SUPPORTED_LANGUAGES
+    })
+
+# ===================================================================
+# 5. QR 코드 스캔 후 리다이렉트 처리 개선
+# ===================================================================
+
+@app.route('/watch/<group_id>')
+def watch_with_language_detection(group_id):
+    """
+    QR 코드 스캔 후 Flutter 앱에서 언어 감지하여 리다이렉트
+    """
+    # 언어 파라미터 확인
+    requested_lang = request.args.get('lang', 'ko')
+    
+    # 지원하지 않는 언어면 한국어로 폴백
+    if requested_lang not in SUPPORTED_LANGUAGES:
+        requested_lang = 'ko'
+    
+    # User-Agent 확인하여 Flutter 앱인지 감지
+    user_agent = request.headers.get('User-Agent', '').lower()
+    is_flutter_app = 'flutter' in user_agent or 'dart' in user_agent
+    
+    if is_flutter_app:
+        # Flutter 앱인 경우 JSON 응답으로 비디오 정보 반환
+        video_data = get_video_with_translation(group_id, requested_lang)
+        if not video_data:
+            return jsonify({'error': 'Video not found'}), 404
+        
+        # URL 갱신
+        current_presigned = video_data.get('presigned_url', '')
+        if not current_presigned or is_presigned_url_expired(current_presigned, 60):
+            new_presigned_url = generate_presigned_url(video_data['video_key'], expires_in=604800)
+            db.collection('uploads').document(group_id).update({
+                'presigned_url': new_presigned_url,
+                'updated_at': datetime.utcnow().isoformat()
+            })
+            video_data['presigned_url'] = new_presigned_url
+        
+        return jsonify({
+            'groupId': group_id,
+            'title': video_data['display_title'],
+            'main_category': video_data['display_main_category'],
+            'sub_category': video_data['display_sub_category'],
+            'video_url': video_data['presigned_url'],
+            'qr_url': video_data.get('qr_presigned_url', ''),
+            'language': requested_lang,
+            'time': video_data.get('time', '0:00'),
+            'level': video_data.get('level', ''),
+            'tag': video_data.get('tag', '')
+        })
+    else:
+        # 웹 브라우저인 경우 기존 HTML 템플릿 렌더링
+        video_data = get_video_with_translation(group_id, requested_lang)
+        if not video_data:
+            abort(404)
+        
+        # URL 갱신 로직 (기존과 동일)
+        current_presigned = video_data.get('presigned_url', '')
+        if not current_presigned or is_presigned_url_expired(current_presigned, 60):
+            new_presigned_url = generate_presigned_url(video_data['video_key'], expires_in=604800)
+            db.collection('uploads').document(group_id).update({
+                'presigned_url': new_presigned_url,
+                'updated_at': datetime.utcnow().isoformat()
+            })
+            video_data['presigned_url'] = new_presigned_url
+        
+        return render_template(
+            'watch.html',
+            video_url=video_data['presigned_url'],
+            video_data=video_data,
+            available_languages=SUPPORTED_LANGUAGES,
+            current_language=requested_lang
+        )
 # ===================================================================
 # 앱 시작 시 스케줄러 자동 실행
 # ===================================================================
