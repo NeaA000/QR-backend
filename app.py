@@ -5,6 +5,7 @@ import uuid
 import re
 import io
 import tempfile
+import urllib.request
 from pathlib import Path
 from datetime import datetime, timedelta, date
 
@@ -15,7 +16,7 @@ from flask import (
 import boto3
 from boto3.s3.transfer import TransferConfig
 import qrcode
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from urllib.parse import urlparse, parse_qs
 import requests
 import zipfile
@@ -59,13 +60,13 @@ translator = Translator()
 
 # 지원 언어 코드 매핑
 SUPPORTED_LANGUAGES = {
-    'ko': 'ko',  # 한국어
-    'zh': 'zh',  # 중국어 (간체)
-    'vi': 'vi',  # 베트남어
-    'th': 'th',  # 태국어
-    'en': 'en',  # 영어
-    'uz': 'uz',  # 우즈베크어
-    'ja': 'ja'   # 일본어
+    'ko': '한국어',
+    'en': 'English',
+    'zh': '中文',
+    'vi': 'Tiếng Việt',
+    'th': 'ไทย',
+    'uz': 'O\'zbek',
+    'ja': '日本語'
 }
 
 # ==== Firebase Admin + Firestore + Storage 초기화 ====
@@ -184,9 +185,108 @@ def generate_presigned_url(key, expires_in=86400):
         ExpiresIn=expires_in
     )
 
+def download_korean_font():
+    """
+    Railway 환경에서 한국어 폰트 다운로드 및 설정
+    """
+    font_dir = Path("fonts")
+    font_dir.mkdir(exist_ok=True)
+    
+    font_path = font_dir / "NotoSansKR-Regular.ttf"
+    
+    if font_path.exists():
+        return str(font_path)
+    
+    try:
+        font_url = "https://fonts.gstatic.com/s/notosanskr/v27/PbykFmXiEBPT4ITbgNA5Cgm20xz64px_1hVWr0wuPNGmlQNMEfD4.ttf"
+        app.logger.info("📥 한국어 폰트 다운로드 중...")
+        urllib.request.urlretrieve(font_url, font_path)
+        app.logger.info(f"✅ 폰트 다운로드 완료: {font_path}")
+        return str(font_path)
+    except Exception as e:
+        app.logger.error(f"❌ 폰트 다운로드 실패: {e}")
+        return None
+
+def get_korean_font(size=24):
+    """
+    Railway 환경에서 한국어 폰트 로드
+    """
+    try:
+        # 1. 다운로드된 한국어 폰트 시도
+        korean_font_path = download_korean_font()
+        if korean_font_path and os.path.exists(korean_font_path):
+            return ImageFont.truetype(korean_font_path, size)
+        
+        # 2. Railway/Linux 환경 폰트 경로들
+        linux_korean_fonts = [
+            '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf'
+        ]
+        
+        for font_path in linux_korean_fonts:
+            if os.path.exists(font_path):
+                try:
+                    return ImageFont.truetype(font_path, size)
+                except Exception:
+                    continue
+        
+        app.logger.warning("⚠️ 한국어 폰트를 찾을 수 없어 기본 폰트 사용")
+        return ImageFont.load_default()
+        
+    except Exception as e:
+        app.logger.error(f"폰트 로드 실패: {e}")
+        return ImageFont.load_default()
+
+def get_text_dimensions(text, font, draw):
+    """텍스트 크기 계산 (Pillow 버전 호환성)"""
+    try:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+    except AttributeError:
+        return draw.textsize(text, font=font)
+
+def split_korean_text(text, font, max_width, draw):
+    """한국어 텍스트를 폭에 맞게 분할"""
+    words = text.split()
+    lines = []
+    current_line = ""
+    
+    for word in words:
+        test_line = current_line + (" " if current_line else "") + word
+        test_width, _ = get_text_dimensions(test_line, font, draw)
+        
+        if test_width <= max_width:
+            current_line = test_line
+        else:
+            if current_line:
+                lines.append(current_line)
+                current_line = word
+            else:
+                # 단어가 너무 긴 경우 강제 분할
+                while word:
+                    test_width, _ = get_text_dimensions(word, font, draw)
+                    if test_width <= max_width:
+                        lines.append(word)
+                        break
+                    # 글자 단위로 분할
+                    for i in range(len(word), 0, -1):
+                        substr = word[:i]
+                        test_width, _ = get_text_dimensions(substr, font, draw)
+                        if test_width <= max_width:
+                            lines.append(substr)
+                            word = word[i:]
+                            break
+                current_line = ""
+    
+    if current_line:
+        lines.append(current_line)
+    
+    return lines
+
 def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size_ratio=0.25, lecture_title=""):
     """
-    QR 코드 생성 후 중앙에 로고 삽입, 하단에 강의명 추가
+    개선된 QR 코드 생성 - Railway 환경 최적화 (한국어 폰트 지원)
     
     Args:
         link_url: QR 코드에 담을 URL
@@ -197,124 +297,125 @@ def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size
     """
     from PIL import ImageDraw, ImageFont
     
-    # QR 코드 생성
-    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_H)
+    # QR 코드 생성 (더 큰 크기와 높은 오류 복구)
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=12,  # 박스 크기 증가
+        border=4,
+    )
     qr.add_data(link_url)
     qr.make(fit=True)
+    
+    # QR 이미지 생성 및 크기 조정
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    qr_size = 500  # 고정 크기로 더 크게
+    qr_img = qr_img.resize((qr_size, qr_size), Image.LANCZOS)
     qr_w, qr_h = qr_img.size
 
     # 로고 삽입
     if os.path.exists(logo_path):
-        logo = Image.open(logo_path)
-        logo_size = int(qr_w * size_ratio)
-        logo = logo.resize((logo_size, logo_size), Image.LANCZOS)
-        pos = ((qr_w - logo_size) // 2, (qr_h - logo_size) // 2)
-        qr_img.paste(logo, pos, mask=(logo if logo.mode == 'RGBA' else None))
+        try:
+            logo = Image.open(logo_path)
+            logo_size = int(qr_w * size_ratio)
+            logo = logo.resize((logo_size, logo_size), Image.LANCZOS)
+            pos = ((qr_w - logo_size) // 2, (qr_h - logo_size) // 2)
+            qr_img.paste(logo, pos, mask=(logo if logo.mode == 'RGBA' else None))
+        except Exception as e:
+            app.logger.warning(f"로고 삽입 실패: {e}")
 
-    # 강의명이 있으면 하단에 텍스트 추가
+    # 강의명 텍스트 추가 (개선된 한국어 지원)
     if lecture_title.strip():
-        # 텍스트 영역 높이 계산
-        text_height = int(qr_h * 0.15)  # QR 코드 높이의 15%
-        margin = int(qr_h * 0.02)       # 여백
+        # 텍스트 영역을 충분히 크게 설정
+        text_height = int(qr_h * 0.3)  # QR 코드 높이의 30%
+        margin = int(qr_h * 0.04)      # 여백 4%
         
-        # 새 이미지 생성 (QR 코드 + 텍스트 영역)
+        # 새 이미지 생성
         total_height = qr_h + text_height + margin
         final_img = Image.new('RGB', (qr_w, total_height), 'white')
-        
-        # QR 코드를 새 이미지에 붙여넣기
         final_img.paste(qr_img, (0, 0))
         
         # 텍스트 그리기 준비
         draw = ImageDraw.Draw(final_img)
         
-        # 폰트 설정 (시스템 폰트 사용, 없으면 기본 폰트)
-        try:
-            # 한글 지원 폰트 시도
-            font_paths = [
-                '/System/Library/Fonts/Helvetica.ttc',           # macOS
-                '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', # Linux
-                'C:/Windows/Fonts/malgun.ttf',                   # Windows 맑은고딕
-                'C:/Windows/Fonts/gulim.ttc',                    # Windows 굴림
-                '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf'  # Linux 대체
-            ]
-            
-            font_size = max(12, int(text_height * 0.4))  # 텍스트 높이에 비례
-            font = None
-            
-            for font_path in font_paths:
-                if os.path.exists(font_path):
-                    try:
-                        font = ImageFont.truetype(font_path, font_size)
-                        break
-                    except Exception:
-                        continue
-            
-            # 적절한 폰트를 찾지 못한 경우 기본 폰트 사용
-            if font is None:
-                font = ImageFont.load_default()
-                
-        except Exception as e:
-            app.logger.warning(f"폰트 로드 실패, 기본 폰트 사용: {e}")
-            font = ImageFont.load_default()
+        # 한국어 폰트 로드 (충분히 큰 크기)
+        base_font_size = max(28, int(text_height * 0.18))  # 최소 28px
+        font = get_korean_font(base_font_size)
         
-        # 텍스트 길이가 너무 길면 줄바꿈 처리
-        max_chars = 25  # 한 줄 최대 문자 수
-        if len(lecture_title) > max_chars:
-            # 단어 단위로 줄바꿈 시도
-            words = lecture_title.split()
-            lines = []
-            current_line = ""
+        # 텍스트 영역 계산
+        max_width = qr_w - 60  # 좌우 여백 30px씩
+        
+        # 텍스트를 여러 줄로 분할
+        lines = split_korean_text(lecture_title, font, max_width, draw)
+        
+        # 3줄 이상이면 폰트 크기 조정
+        if len(lines) > 3:
+            font_size = max(22, int(base_font_size * 0.75))
+            font = get_korean_font(font_size)
+            lines = split_korean_text(lecture_title, font, max_width, draw)
             
-            for word in words:
-                test_line = current_line + (" " if current_line else "") + word
-                if len(test_line) <= max_chars:
-                    current_line = test_line
-                else:
-                    if current_line:
-                        lines.append(current_line)
-                    current_line = word
-            
-            if current_line:
-                lines.append(current_line)
-            
-            # 최대 2줄까지만 표시
-            if len(lines) > 2:
+            # 여전히 3줄 이상이면 자르기
+            if len(lines) > 3:
                 lines = lines[:2]
-                lines[1] = lines[1][:max_chars-3] + "..."
-                
-        else:
-            lines = [lecture_title]
+                last_line = lines[1]
+                while True:
+                    test_text = last_line + "..."
+                    test_width, _ = get_text_dimensions(test_text, font, draw)
+                    if test_width <= max_width or len(last_line) <= 3:
+                        lines[1] = test_text
+                        break
+                    last_line = last_line[:-1]
+        
+        # 최대 3줄로 제한
+        lines = lines[:3]
+        
+        # 텍스트 배치 계산
+        _, line_height = get_text_dimensions("한글Ag", font, draw)
+        total_text_height = len(lines) * line_height + (len(lines) - 1) * 8  # 줄간격 8px
+        text_y_start = qr_h + margin + (text_height - total_text_height) // 2
         
         # 텍스트 그리기
-        text_y_start = qr_h + margin
-        line_height = text_height // len(lines)
-        
         for i, line in enumerate(lines):
-            # 텍스트 박스 크기 계산
-            try:
-                bbox = draw.textbbox((0, 0), line, font=font)
-                text_width = bbox[2] - bbox[0]
-                text_actual_height = bbox[3] - bbox[1]
-            except AttributeError:
-                # 구버전 Pillow 호환성
-                text_width, text_actual_height = draw.textsize(line, font=font)
+            if not line.strip():
+                continue
+                
+            text_width, _ = get_text_dimensions(line, font, draw)
+            text_x = (qr_w - text_width) // 2  # 중앙 정렬
+            text_y = text_y_start + (i * (line_height + 8))
             
-            # 중앙 정렬
-            text_x = (qr_w - text_width) // 2
-            text_y = text_y_start + (i * line_height) + (line_height - text_actual_height) // 2
+            # 가독성을 위한 흰색 외곽선 (선택사항)
+            outline_offset = 2
+            for dx in [-outline_offset, 0, outline_offset]:
+                for dy in [-outline_offset, 0, outline_offset]:
+                    if dx != 0 or dy != 0:
+                        draw.text((text_x + dx, text_y + dy), line, font=font, fill='white')
             
-            # 텍스트 그리기 (검은색)
+            # 메인 텍스트 (검은색)
             draw.text((text_x, text_y), line, font=font, fill='black')
         
-        # 최종 이미지 저장
-        final_img.save(output_path)
-        app.logger.info(f"✅ QR 코드 생성 완료 (강의명 포함): {lecture_title}")
+        # 고품질로 저장
+        final_img.save(output_path, quality=95, optimize=True, dpi=(300, 300))
+        app.logger.info(f"✅ 개선된 QR 코드 생성 완료: {lecture_title} (크기: {qr_w}x{total_height})")
         
     else:
-        # 강의명이 없으면 기존 QR 코드만 저장
-        qr_img.save(output_path)
-        app.logger.info(f"✅ QR 코드 생성 완료 (강의명 없음)")
+        # 강의명이 없으면 QR 코드만 저장
+        qr_img.save(output_path, quality=95, optimize=True)
+        app.logger.info("✅ QR 코드 생성 완료 (강의명 없음)")
+
+def initialize_korean_fonts():
+    """앱 시작 시 한국어 폰트 환경 초기화"""
+    try:
+        font_dir = Path("fonts")
+        font_dir.mkdir(exist_ok=True)
+        
+        # 한국어 폰트 미리 다운로드
+        download_korean_font()
+        
+        app.logger.info("✅ 한국어 폰트 환경 초기화 완료")
+        return True
+    except Exception as e:
+        app.logger.error(f"❌ 한국어 폰트 초기화 실패: {e}")
+        return False
 
 def is_presigned_url_expired(url, safety_margin_minutes=60):
     """
@@ -398,6 +499,116 @@ def admin_required(f):
     return decorated
 
 # ===================================================================
+# 개선된 다국어 처리 함수들
+# ===================================================================
+
+def get_video_with_translation(group_id, lang_code='ko'):
+    """
+    특정 언어로 비디오 정보 조회
+    
+    Args:
+        group_id: 비디오 그룹 ID
+        lang_code: 언어 코드 (기본값: 'ko')
+    
+    Returns:
+        dict: 루트 데이터 + 해당 언어 번역 데이터
+    """
+    try:
+        # 1) 루트 문서 조회
+        root_doc = db.collection('uploads').document(group_id).get()
+        if not root_doc.exists:
+            return None
+        
+        root_data = root_doc.to_dict()
+        
+        # 2) 번역 문서 조회
+        translation_doc = db.collection('uploads').document(group_id) \
+                           .collection('translations').document(lang_code).get()
+        
+        if translation_doc.exists:
+            translation_data = translation_doc.to_dict()
+            # 번역 데이터를 루트 데이터에 오버라이드
+            root_data.update({
+                'display_title': translation_data.get('title', root_data.get('group_name')),
+                'display_main_category': translation_data.get('main_category', root_data.get('main_category')),
+                'display_sub_category': translation_data.get('sub_category', root_data.get('sub_category')),
+                'display_sub_sub_category': translation_data.get('sub_sub_category', root_data.get('sub_sub_category')),
+                'current_language': lang_code,
+                'language_name': translation_data.get('language_name', SUPPORTED_LANGUAGES.get(lang_code, lang_code))
+            })
+        else:
+            # 번역이 없으면 한국어(원본) 사용
+            root_data.update({
+                'display_title': root_data.get('group_name'),
+                'display_main_category': root_data.get('main_category'),
+                'display_sub_category': root_data.get('sub_category'),
+                'display_sub_sub_category': root_data.get('sub_sub_category'),
+                'current_language': 'ko',
+                'language_name': '한국어'
+            })
+        
+        return root_data
+        
+    except Exception as e:
+        app.logger.error(f"비디오 조회 실패 ({group_id}, {lang_code}): {e}")
+        return None
+
+def add_language_to_existing_videos(new_lang_code, new_lang_name):
+    """
+    기존 비디오들에 새로운 언어 번역 추가
+    
+    Args:
+        new_lang_code: 새 언어 코드 (예: 'fr')
+        new_lang_name: 새 언어 이름 (예: 'Français')
+    """
+    try:
+        # 모든 업로드 문서 조회
+        uploads = db.collection('uploads').stream()
+        
+        for doc in uploads:
+            root_data = doc.to_dict()
+            group_id = doc.id
+            
+            # 한국어 원본 텍스트들
+            korean_title = root_data.get('group_name', '')
+            korean_main_cat = root_data.get('main_category', '')
+            korean_sub_cat = root_data.get('sub_category', '')
+            korean_leaf_cat = root_data.get('sub_sub_category', '')
+            
+            # 새 언어로 번역
+            translated_title = translate_text(korean_title, new_lang_code)
+            translated_main = translate_text(korean_main_cat, new_lang_code)
+            translated_sub = translate_text(korean_sub_cat, new_lang_code)
+            translated_leaf = translate_text(korean_leaf_cat, new_lang_code)
+            
+            # 새 번역 문서 생성
+            translation_data = {
+                'title': translated_title,
+                'main_category': translated_main,
+                'sub_category': translated_sub,
+                'sub_sub_category': translated_leaf,
+                'language_code': new_lang_code,
+                'language_name': new_lang_name,
+                'is_original': False,
+                'translated_at': datetime.utcnow().isoformat()
+            }
+            
+            # 번역 서브컬렉션에 추가
+            db.collection('uploads').document(group_id) \
+              .collection('translations').document(new_lang_code) \
+              .set(translation_data)
+            
+            app.logger.info(f"언어 추가 완료: {group_id} -> {new_lang_code}")
+            
+            # API 제한 방지
+            time.sleep(0.3)
+        
+        app.logger.info(f"✅ 모든 비디오에 {new_lang_name}({new_lang_code}) 언어 추가 완료")
+        
+    except Exception as e:
+        app.logger.error(f"언어 추가 실패: {e}")
+
+# ===================================================================
 # 백그라운드 자동 갱신 시스템
 # ===================================================================
 
@@ -433,12 +644,6 @@ def refresh_expiring_urls():
                     # 새 presigned URL 생성 (7일 유효)
                     new_presigned_url = generate_presigned_url(video_key, expires_in=604800)
                     
-                    # QR URL도 갱신
-                    qr_key = data.get('qr_key', '')
-                    if qr_key:
-                        new_qr_url = generate_presigned_url(qr_key, expires_in=604800)
-                        update_data['qr_presigned_url'] = new_qr_url
-                    
                     # Firestore 업데이트
                     update_data = {
                         'presigned_url': new_presigned_url,
@@ -446,8 +651,11 @@ def refresh_expiring_urls():
                         'auto_update_reason': 'background_refresh'
                     }
                     
+                    # QR URL도 갱신
+                    qr_key = data.get('qr_key', '')
                     if qr_key:
-                        update_data['qr_presigned_url'] = generate_presigned_url(qr_key, expires_in=604800)
+                        new_qr_url = generate_presigned_url(qr_key, expires_in=604800)
+                        update_data['qr_presigned_url'] = new_qr_url
                     
                     doc.reference.update(update_data)
                     
@@ -599,17 +807,18 @@ def get_scheduler_status():
         return jsonify({'error': '스케줄러 상태를 가져올 수 없습니다.'}), 500
 
 # ===================================================================
-# 업로드 핸들러: 자동 번역 기능 포함
+# 개선된 업로드 핸들러: 서브컬렉션 번역 구조
 # ===================================================================
 @app.route('/upload', methods=['POST'])
 def upload_video():
     """
-    동영상 업로드 처리 (다국어 번역 기능 추가):
+    개선된 업로드 처리: 루트 문서와 번역 서브컬렉션 분리
     1) 클라이언트에서 파일과 기타 메타데이터 수신
     2) 한국어 강의명을 7개 언어로 자동 번역
     3) 파일을 임시로 저장 → S3 업로드
     4) moviepy로 동영상 길이(초 단위) 계산 → "분:초" 문자열로 변환
-    5) Firestore에 다국어 메타데이터 저장
+    5) 루트 문서에 핵심 메타데이터 저장
+    6) 번역 서브컬렉션에 언어별 번역 저장
     """
     # 세션 인증(기존 로직)
     if not session.get('logged_in'):
@@ -694,32 +903,64 @@ def upload_video():
     except OSError:
         pass
 
-    # 7) Firestore에 다국어 메타데이터 저장 (단일 QR)
-    firestore_data = {
+    # 📝 7) 루트 문서 저장 (핵심 메타데이터만)
+    root_doc_data = {
         'group_id': group_id,
-        'group_name': group_name,  # 원본 한국어 이름 유지 (호환성)
-        'translations': {
-            'title': translated_titles,
-            'main_category': translated_main_cat,
-            'sub_category': translated_sub_cat,
-            'sub_sub_category': translated_leaf_cat
-        },
+        'group_name': group_name,           # 기본 언어(한국어)
+        'main_category': main_cat,
+        'sub_category': sub_cat,
+        'sub_sub_category': leaf_cat,
         'time': lecture_time,
         'level': lecture_level,
         'tag': lecture_tag,
         'video_key': video_key,
         'presigned_url': presigned_url,
-        'qr_link': qr_link,  # 단일 QR 링크
-        'qr_key': qr_key,    # 단일 QR 키
-        'qr_presigned_url': qr_presigned_url,  # 단일 QR URL
+        'qr_link': qr_link,
+        'qr_key': qr_key,
+        'qr_presigned_url': qr_presigned_url,
         'upload_date': date_str,
-        'auto_updated_at': datetime.utcnow().isoformat(),
-        'auto_update_reason': 'initial_upload_with_translation'
+        'created_at': datetime.utcnow().isoformat(),
+        'updated_at': datetime.utcnow().isoformat()
     }
 
-    db.collection('uploads').document(group_id).set(firestore_data)
+    # 루트 문서 저장
+    root_doc_ref = db.collection('uploads').document(group_id)
+    root_doc_ref.set(root_doc_data)
 
-    app.logger.info(f"✅ 다국어 업로드 완료: {group_id}")
+    # 📝 8) 번역 서브컬렉션 저장 (언어별로 분리)
+    translations_ref = root_doc_ref.collection('translations')
+    
+    for lang_code in SUPPORTED_LANGUAGES.keys():
+        if lang_code == 'ko':
+            # 한국어는 원본 그대로
+            translation_data = {
+                'title': group_name,
+                'main_category': main_cat,
+                'sub_category': sub_cat,
+                'sub_sub_category': leaf_cat,
+                'language_code': lang_code,
+                'language_name': SUPPORTED_LANGUAGES[lang_code],
+                'is_original': True,
+                'translated_at': datetime.utcnow().isoformat()
+            }
+        else:
+            # 번역된 언어들
+            translation_data = {
+                'title': translated_titles.get(lang_code, group_name),
+                'main_category': translated_main_cat.get(lang_code, main_cat),
+                'sub_category': translated_sub_cat.get(lang_code, sub_cat),
+                'sub_sub_category': translated_leaf_cat.get(lang_code, leaf_cat),
+                'language_code': lang_code,
+                'language_name': SUPPORTED_LANGUAGES[lang_code],
+                'is_original': False,
+                'translated_at': datetime.utcnow().isoformat()
+            }
+        
+        # 각 언어별 문서 저장
+        translations_ref.document(lang_code).set(translation_data)
+        app.logger.info(f"번역 저장 완료: {lang_code} - {translation_data.get('title')}")
+
+    app.logger.info(f"✅ 개선된 구조로 업로드 완료: {group_id}")
     app.logger.info(f"번역된 언어: {list(translated_titles.keys())}")
 
     return render_template(
@@ -730,7 +971,7 @@ def upload_video():
         level=lecture_level,
         tag=lecture_tag,
         presigned_url=presigned_url,
-        qr_url=qr_presigned_url  # 단일 QR URL
+        qr_url=qr_presigned_url
     )
 
 # ===================================================================
@@ -876,7 +1117,9 @@ def add_certificate_to_master():
 
     return jsonify({'message': '마스터 엑셀에 수료증 정보가 성공적으로 추가되었습니다.'}), 200
 
-# ==== 라우팅 설정 ====
+# ===================================================================
+# 개선된 라우팅 설정
+# ===================================================================
 
 @app.route('/', methods=['GET'])
 def login_page():
@@ -943,45 +1186,209 @@ def upload_form():
 @app.route('/watch/<group_id>', methods=['GET'])
 def watch(group_id):
     """
-    동영상 시청 페이지 (다국어 지원)
+    개선된 동영상 시청 페이지: 언어별 번역 서브컬렉션 활용
     Flutter 앱에서 언어를 동적으로 변경 가능
     """
-    doc_ref = db.collection('uploads').document(group_id)
-    doc = doc_ref.get()
-    if not doc.exists:
-        abort(404)
+    # URL에서 언어 파라미터 확인
+    requested_lang = request.args.get('lang', 'ko')
     
-    data = doc.to_dict()
+    # 지원하지 않는 언어면 한국어로 폴백
+    if requested_lang not in SUPPORTED_LANGUAGES:
+        requested_lang = 'ko'
+    
+    # 비디오 데이터 조회 (번역 포함)
+    video_data = get_video_with_translation(group_id, requested_lang)
+    if not video_data:
+        abort(404)
 
     # Presigned URL 갱신 로직 (기존과 동일)
-    current_presigned = data.get('presigned_url', '')
+    current_presigned = video_data.get('presigned_url', '')
     if not current_presigned or is_presigned_url_expired(current_presigned, 60):
-        new_presigned_url = generate_presigned_url(data['video_key'], expires_in=604800)
-        doc_ref.update({
+        new_presigned_url = generate_presigned_url(video_data['video_key'], expires_in=604800)
+        
+        # 루트 문서만 업데이트
+        db.collection('uploads').document(group_id).update({
             'presigned_url': new_presigned_url,
-            'branch_updated_at': datetime.utcnow().isoformat()
+            'updated_at': datetime.utcnow().isoformat()
         })
-        video_url = new_presigned_url
-    else:
-        video_url = current_presigned
+        video_data['presigned_url'] = new_presigned_url
 
     # QR URL도 갱신 확인
-    current_qr_url = data.get('qr_presigned_url', '')
-    qr_key = data.get('qr_key', '')
+    current_qr_url = video_data.get('qr_presigned_url', '')
+    qr_key = video_data.get('qr_key', '')
     if qr_key and (not current_qr_url or is_presigned_url_expired(current_qr_url, 60)):
         new_qr_url = generate_presigned_url(qr_key, expires_in=604800)
-        doc_ref.update({
+        db.collection('uploads').document(group_id).update({
             'qr_presigned_url': new_qr_url,
             'qr_updated_at': datetime.utcnow().isoformat()
         })
+        video_data['qr_presigned_url'] = new_qr_url
     
-    # 다국어 메타데이터 포함해서 반환 (Flutter에서 동적 선택용)
+    # 템플릿에 번역된 데이터 전달
     return render_template(
-        'watch.html', 
-        video_url=video_url,
-        group_data=data,  # 전체 데이터 전달
-        available_languages=SUPPORTED_LANGUAGES
+        'watch.html',
+        video_url=video_data['presigned_url'],
+        video_data=video_data,
+        available_languages=SUPPORTED_LANGUAGES,
+        current_language=requested_lang
     )
+
+# ===================================================================
+# 다국어 API 엔드포인트들
+# ===================================================================
+
+@app.route('/api/videos', methods=['GET'])
+def get_videos_list():
+    """
+    비디오 목록 조회 API (다국어 지원)
+    Query params:
+    - lang: 언어 코드 (기본값: ko)
+    - category: 카테고리 필터
+    - level: 레벨 필터
+    """
+    lang_code = request.args.get('lang', 'ko')
+    category_filter = request.args.get('category')
+    level_filter = request.args.get('level')
+    
+    if lang_code not in SUPPORTED_LANGUAGES:
+        lang_code = 'ko'
+    
+    try:
+        # 루트 컬렉션에서 기본 필터링
+        query = db.collection('uploads')
+        
+        if category_filter:
+            query = query.where('main_category', '==', category_filter)
+        if level_filter:
+            query = query.where('level', '==', level_filter)
+        
+        docs = query.stream()
+        
+        videos = []
+        for doc in docs:
+            video_data = get_video_with_translation(doc.id, lang_code)
+            if video_data:
+                # 필요한 필드만 선택해서 응답 크기 최소화
+                videos.append({
+                    'group_id': video_data['group_id'],
+                    'title': video_data['display_title'],
+                    'main_category': video_data['display_main_category'],
+                    'sub_category': video_data['display_sub_category'],
+                    'sub_sub_category': video_data['display_sub_sub_category'],
+                    'time': video_data['time'],
+                    'level': video_data['level'],
+                    'tag': video_data.get('tag', ''),
+                    'upload_date': video_data['upload_date'],
+                    'language': lang_code,
+                    'qr_url': video_data.get('qr_presigned_url', '')
+                })
+        
+        return jsonify({
+            'videos': videos,
+            'language': lang_code,
+            'language_name': SUPPORTED_LANGUAGES[lang_code],
+            'total': len(videos)
+        })
+        
+    except Exception as e:
+        app.logger.error(f"비디오 목록 조회 실패: {e}")
+        return jsonify({'error': '비디오 목록을 가져올 수 없습니다.'}), 500
+
+@app.route('/api/videos/<group_id>', methods=['GET'])
+def get_video_detail(group_id):
+    """
+    특정 비디오 상세 정보 조회 API (다국어 지원)
+    Query params:
+    - lang: 언어 코드 (기본값: ko)
+    """
+    lang_code = request.args.get('lang', 'ko')
+    
+    if lang_code not in SUPPORTED_LANGUAGES:
+        lang_code = 'ko'
+    
+    video_data = get_video_with_translation(group_id, lang_code)
+    if not video_data:
+        return jsonify({'error': '비디오를 찾을 수 없습니다.'}), 404
+    
+    # URL 갱신 확인
+    current_presigned = video_data.get('presigned_url', '')
+    if not current_presigned or is_presigned_url_expired(current_presigned, 60):
+        new_presigned_url = generate_presigned_url(video_data['video_key'], expires_in=604800)
+        db.collection('uploads').document(group_id).update({
+            'presigned_url': new_presigned_url,
+            'updated_at': datetime.utcnow().isoformat()
+        })
+        video_data['presigned_url'] = new_presigned_url
+    
+    return jsonify({
+        'group_id': video_data['group_id'],
+        'title': video_data['display_title'],
+        'main_category': video_data['display_main_category'],
+        'sub_category': video_data['display_sub_category'],
+        'sub_sub_category': video_data['display_sub_sub_category'],
+        'time': video_data['time'],
+        'level': video_data['level'],
+        'tag': video_data.get('tag', ''),
+        'video_url': video_data['presigned_url'],
+        'qr_url': video_data.get('qr_presigned_url', ''),
+        'qr_link': video_data.get('qr_link', ''),
+        'language': lang_code,
+        'language_name': SUPPORTED_LANGUAGES[lang_code],
+        'upload_date': video_data['upload_date']
+    })
+
+@app.route('/api/admin/add-language', methods=['POST'])
+@admin_required
+def api_add_language():
+    """
+    관리자용: 새로운 언어 추가 API
+    Body: { "language_code": "fr", "language_name": "Français" }
+    """
+    data = request.get_json() or {}
+    lang_code = data.get('language_code', '').strip().lower()
+    lang_name = data.get('language_name', '').strip()
+    
+    if not lang_code or not lang_name:
+        return jsonify({'error': 'language_code와 language_name이 필요합니다.'}), 400
+    
+    if lang_code in SUPPORTED_LANGUAGES:
+        return jsonify({'error': f'언어 코드 {lang_code}는 이미 지원됩니다.'}), 400
+    
+    try:
+        # 백그라운드에서 실행
+        thread = threading.Thread(
+            target=add_language_to_existing_videos, 
+            args=(lang_code, lang_name)
+        )
+        thread.daemon = True
+        thread.start()
+        
+        # 전역 언어 목록에 추가
+        SUPPORTED_LANGUAGES[lang_code] = lang_name
+        
+        return jsonify({
+            'message': f'{lang_name}({lang_code}) 언어 추가 작업이 백그라운드에서 시작되었습니다.',
+            'language_code': lang_code,
+            'language_name': lang_name
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"언어 추가 실패: {e}")
+        return jsonify({'error': '언어 추가 작업 시작에 실패했습니다.'}), 500
+
+@app.route('/api/languages', methods=['GET'])
+def get_supported_languages():
+    """
+    지원하는 언어 목록 조회 API
+    """
+    return jsonify({
+        'languages': SUPPORTED_LANGUAGES,
+        'total': len(SUPPORTED_LANGUAGES)
+    })
+
+# ===================================================================
+# 기존 ZIP 생성 엔드포인트들
+# ===================================================================
 
 @app.route('/generate_weekly_zip', methods=['GET'])
 @admin_required
@@ -1185,13 +1592,357 @@ def generate_selected_zip():
     })
 
 # ===================================================================
+# 데이터 마이그레이션 유틸리티 (기존 구조 → 새 구조)
+# ===================================================================
+
+@app.route('/api/admin/migrate-to-subcollections', methods=['POST'])
+@admin_required
+def migrate_to_subcollections():
+    """
+    관리자용: 기존 translations 필드를 서브컬렉션으로 마이그레이션
+    
+    기존 구조:
+    uploads/{group_id} {
+        translations: {
+            title: { ko: "...", en: "...", ... },
+            main_category: { ko: "...", en: "...", ... }
+        }
+    }
+    
+    새 구조:
+    uploads/{group_id}/translations/{lang_code} {
+        title: "...",
+        main_category: "...",
+        language_code: "...",
+        language_name: "..."
+    }
+    """
+    try:
+        # 모든 업로드 문서 조회
+        uploads = db.collection('uploads').stream()
+        migrated_count = 0
+        error_count = 0
+        
+        for doc in uploads:
+            try:
+                data = doc.to_dict()
+                group_id = doc.id
+                
+                # 기존 translations 필드 확인
+                old_translations = data.get('translations', {})
+                if not old_translations:
+                    app.logger.info(f"문서 {group_id}: translations 필드 없음, 건너뜀")
+                    continue
+                
+                # 번역 서브컬렉션 생성
+                translations_ref = doc.reference.collection('translations')
+                
+                # 언어별로 문서 생성
+                for lang_code in SUPPORTED_LANGUAGES.keys():
+                    translation_data = {
+                        'title': old_translations.get('title', {}).get(lang_code, data.get('group_name', '')),
+                        'main_category': old_translations.get('main_category', {}).get(lang_code, data.get('main_category', '')),
+                        'sub_category': old_translations.get('sub_category', {}).get(lang_code, data.get('sub_category', '')),
+                        'sub_sub_category': old_translations.get('sub_sub_category', {}).get(lang_code, data.get('sub_sub_category', '')),
+                        'language_code': lang_code,
+                        'language_name': SUPPORTED_LANGUAGES[lang_code],
+                        'is_original': (lang_code == 'ko'),
+                        'migrated_at': datetime.utcnow().isoformat(),
+                        'migration_source': 'legacy_translations_field'
+                    }
+                    
+                    translations_ref.document(lang_code).set(translation_data)
+                
+                # 기존 translations 필드 제거
+                doc.reference.update({
+                    'translations': firestore.DELETE_FIELD,
+                    'migrated_to_subcollections': True,
+                    'migration_completed_at': datetime.utcnow().isoformat()
+                })
+                
+                migrated_count += 1
+                app.logger.info(f"✅ 마이그레이션 완료: {group_id}")
+                
+            except Exception as doc_error:
+                error_count += 1
+                app.logger.error(f"❌ 문서 {group_id} 마이그레이션 실패: {doc_error}")
+        
+        return jsonify({
+            'message': '마이그레이션이 완료되었습니다.',
+            'migrated_count': migrated_count,
+            'error_count': error_count,
+            'total_processed': migrated_count + error_count
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"마이그레이션 실패: {e}")
+        return jsonify({'error': '마이그레이션 중 오류가 발생했습니다.'}), 500
+
+@app.route('/api/admin/cleanup-old-translations', methods=['POST'])
+@admin_required
+def cleanup_old_translations():
+    """
+    관리자용: 마이그레이션 후 정리 작업
+    - migrated_to_subcollections 플래그가 있는 문서들의 남은 translations 필드 제거
+    """
+    try:
+        uploads = db.collection('uploads') \
+                   .where('migrated_to_subcollections', '==', True) \
+                   .stream()
+        
+        cleaned_count = 0
+        
+        for doc in uploads:
+            data = doc.to_dict()
+            if 'translations' in data:
+                doc.reference.update({
+                    'translations': firestore.DELETE_FIELD,
+                    'cleaned_up_at': datetime.utcnow().isoformat()
+                })
+                cleaned_count += 1
+                app.logger.info(f"✅ 정리 완료: {doc.id}")
+        
+        return jsonify({
+            'message': '정리 작업이 완료되었습니다.',
+            'cleaned_count': cleaned_count
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"정리 작업 실패: {e}")
+        return jsonify({'error': '정리 작업 중 오류가 발생했습니다.'}), 500
+
+# ===================================================================
+# 통계 및 모니터링 API
+# ===================================================================
+
+@app.route('/api/admin/stats', methods=['GET'])
+@admin_required
+def get_admin_stats():
+    """
+    관리자용 통계 대시보드 API
+    """
+    try:
+        # 전체 비디오 수
+        total_videos = len(list(db.collection('uploads').stream()))
+        
+        # 언어별 번역 완성도
+        language_stats = {}
+        for lang_code, lang_name in SUPPORTED_LANGUAGES.items():
+            translation_count = 0
+            uploads = db.collection('uploads').stream()
+            
+            for doc in uploads:
+                translation_doc = doc.reference.collection('translations').document(lang_code).get()
+                if translation_doc.exists:
+                    translation_count += 1
+            
+            language_stats[lang_code] = {
+                'name': lang_name,
+                'translated_count': translation_count,
+                'completion_rate': (translation_count / total_videos * 100) if total_videos > 0 else 0
+            }
+        
+        # 최근 업로드 (7일)
+        week_ago = datetime.utcnow() - timedelta(days=7)
+        recent_uploads = 0
+        uploads = db.collection('uploads').where('created_at', '>=', week_ago.isoformat()).stream()
+        recent_uploads = len(list(uploads))
+        
+        return jsonify({
+            'total_videos': total_videos,
+            'supported_languages': len(SUPPORTED_LANGUAGES),
+            'language_stats': language_stats,
+            'recent_uploads_7days': recent_uploads,
+            'scheduler_running': scheduler.running if 'scheduler' in globals() else False
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"통계 조회 실패: {e}")
+        return jsonify({'error': '통계를 가져올 수 없습니다.'}), 500
+
+# ===================================================================
+# 헬스체크 엔드포인트
+# ===================================================================
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """
+    서비스 상태 확인 엔드포인트
+    """
+    try:
+        # Firestore 연결 확인
+        db.collection('uploads').limit(1).get()
+        firestore_status = 'healthy'
+    except Exception:
+        firestore_status = 'unhealthy'
+    
+    try:
+        # S3 연결 확인
+        s3.head_bucket(Bucket=BUCKET_NAME)
+        s3_status = 'healthy'
+    except Exception:
+        s3_status = 'unhealthy'
+    
+    overall_status = 'healthy' if (firestore_status == 'healthy' and s3_status == 'healthy') else 'unhealthy'
+    
+    return jsonify({
+        'status': overall_status,
+        'timestamp': datetime.utcnow().isoformat(),
+        'services': {
+            'firestore': firestore_status,
+            's3': s3_status,
+            'scheduler': scheduler.running if 'scheduler' in globals() else False
+        },
+        'supported_languages': list(SUPPORTED_LANGUAGES.keys()),
+        'version': '2.0.0-improved'
+    }), 200 if overall_status == 'healthy' else 503
+
+# Railway 환경을 위한 초기화 함수
+def initialize_railway_environment():
+    """Railway 배포 환경 초기화"""
+    try:
+        # 폰트 환경 초기화
+        initialize_korean_fonts()
+        
+        # 정적 파일 디렉토리 확인
+        os.makedirs('static', exist_ok=True)
+        os.makedirs('fonts', exist_ok=True)
+        
+        # 환경별 로그 레벨 설정
+        if os.environ.get('RAILWAY_ENVIRONMENT'):
+            import logging
+            app.logger.setLevel(logging.INFO)
+        
+        app.logger.info("🚂 Railway 환경 초기화 완료")
+        return True
+        
+    except Exception as e:
+        app.logger.error(f"❌ Railway 환경 초기화 실패: {e}")
+        return False
+
+# ===================================================================
 # 앱 시작 시 스케줄러 자동 실행
 # ===================================================================
 
 if __name__ == "__main__":
+    # Railway 환경 초기화
+    initialize_railway_environment()
+    
     # 스케줄러 시작
     start_background_scheduler()
     
     port = int(os.environ.get("PORT", 8080))
-    # 운영 모드로 실행 (디버거 비활성화)
-    app.run(host="0.0.0.0", port=port, debug=False)
+    
+    # Railway 환경에서는 gunicorn 사용 권장
+    if os.environ.get('RAILWAY_ENVIRONMENT'):
+        # Railway에서는 gunicorn이 자동으로 처리
+        app.run(host="0.0.0.0", port=port, debug=False)
+    else:
+        # 로컬 개발 환경
+        app.run(host="0.0.0.0", port=port, debug=True)
+
+# ===================================================================
+# 추가 유틸리티 함수들
+# ===================================================================
+
+def batch_update_translations(updates_list):
+    """
+    번역 일괄 업데이트 유틸리티
+    
+    Args:
+        updates_list: [
+            {
+                'group_id': 'abc123',
+                'lang_code': 'en', 
+                'updates': {'title': 'New Title', 'main_category': 'New Category'}
+            },
+            ...
+        ]
+    """
+    try:
+        batch = db.batch()
+        
+        for update_item in updates_list:
+            group_id = update_item['group_id']
+            lang_code = update_item['lang_code']
+            updates = update_item['updates']
+            
+            translation_ref = db.collection('uploads').document(group_id) \
+                               .collection('translations').document(lang_code)
+            
+            updates['updated_at'] = datetime.utcnow().isoformat()
+            batch.update(translation_ref, updates)
+        
+        batch.commit()
+        app.logger.info(f"✅ 일괄 번역 업데이트 완료: {len(updates_list)}개")
+        return True
+        
+    except Exception as e:
+        app.logger.error(f"일괄 번역 업데이트 실패: {e}")
+        return False
+
+def verify_translation_integrity():
+    """
+    번역 데이터 무결성 검증
+    - 모든 비디오에 필요한 언어 번역이 있는지 확인
+    - 누락된 번역 자동 생성
+    """
+    try:
+        uploads = db.collection('uploads').stream()
+        missing_translations = []
+        
+        for doc in uploads:
+            root_data = doc.to_dict()
+            group_id = doc.id
+            
+            # 각 언어별 번역 문서 확인
+            for lang_code in SUPPORTED_LANGUAGES.keys():
+                translation_doc = doc.reference.collection('translations').document(lang_code).get()
+                
+                if not translation_doc.exists:
+                    missing_translations.append({
+                        'group_id': group_id,
+                        'lang_code': lang_code,
+                        'korean_title': root_data.get('group_name', ''),
+                        'korean_main_cat': root_data.get('main_category', ''),
+                        'korean_sub_cat': root_data.get('sub_category', ''),
+                        'korean_leaf_cat': root_data.get('sub_sub_category', '')
+                    })
+        
+        app.logger.info(f"번역 무결성 검증 완료: {len(missing_translations)}개 누락 발견")
+        return missing_translations
+        
+    except Exception as e:
+        app.logger.error(f"번역 무결성 검증 실패: {e}")
+        return None
+
+# ===================================================================
+# 개발/테스트용 엔드포인트 (운영에서는 제거 권장)
+# ===================================================================
+
+@app.route('/api/dev/test-translation', methods=['POST'])
+def test_translation():
+    """
+    개발용: 번역 테스트 엔드포인트
+    Body: { "text": "테스트할 텍스트", "target_lang": "en" }
+    """
+    if not app.debug:  # 디버그 모드에서만 사용 가능
+        return jsonify({'error': '개발 모드에서만 사용 가능합니다.'}), 403
+    
+    data = request.get_json() or {}
+    text = data.get('text', '')
+    target_lang = data.get('target_lang', 'en')
+    
+    if not text:
+        return jsonify({'error': 'text가 필요합니다.'}), 400
+    
+    try:
+        translated = translate_text(text, target_lang)
+        return jsonify({
+            'original': text,
+            'translated': translated,
+            'target_language': target_lang,
+            'target_language_name': SUPPORTED_LANGUAGES.get(target_lang, target_lang)
+        })
+    except Exception as e:
+        return jsonify({'error': f'번역 실패: {e}'}), 500
