@@ -1,4 +1,4 @@
-# backend/app.py
+# backend/app.py - 완전 수정 버전
 
 import os
 import uuid
@@ -54,15 +54,15 @@ BUCKET_NAME       = os.environ['BUCKET_NAME']
 APP_BASE_URL      = os.environ.get('APP_BASE_URL', 'http://localhost:5000/watch/')
 SECRET_KEY        = os.environ.get('FLASK_SECRET_KEY', 'supersecret')
 
-# ==== 번역 관련 설정 ====
+# ==== 번역 관련 설정 - 수정됨 ====
 # 전역 번역기 인스턴스
 translator = Translator()
 
-# 지원 언어 코드 매핑
+# 지원 언어 코드 매핑 - 중국어 코드 수정
 SUPPORTED_LANGUAGES = {
     'ko': '한국어',
     'en': 'English',
-    'zh': '中文',
+    'zh-cn': '中文',      # 'zh' → 'zh-cn'으로 변경
     'vi': 'Tiếng Việt',
     'th': 'ไทย',
     'uz': 'O\'zbek',
@@ -95,7 +95,7 @@ bucket = storage.bucket()  # Firebase Storage 기본 버킷
 app = Flask(__name__)
 app.secret_key                   = SECRET_KEY
 app.config['UPLOAD_FOLDER']      = 'static'
-app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024 * 1024  # 2GB 상한
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB로 제한 (Railway 최적화)
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # ==== Wasabi S3 클라이언트 설정 ====
@@ -113,25 +113,23 @@ config = TransferConfig(
     use_threads         = True
 )
 
-# ==== 번역 유틸리티 함수들 ====
+# ==== 수정된 번역 유틸리티 함수들 ====
 
 def translate_text(text, target_language):
     """
-    Google Translate API를 사용해서 텍스트 번역
-    
-    Args:
-        text: 번역할 텍스트 (한국어)
-        target_language: 대상 언어 코드
-    
-    Returns:
-        번역된 텍스트 또는 원본 텍스트 (실패 시)
+    수정된 번역 함수 - Railway 환경 최적화
     """
     try:
         if target_language == 'ko' or not text.strip():
-            return text  # 한국어는 원본 그대로, 빈 텍스트도 그대로
+            return text
+        
+        # 중국어 언어 코드 수정
+        google_lang_code = target_language
+        if target_language == 'zh-cn':
+            google_lang_code = 'zh'
         
         # 번역 요청 (한국어 → 대상 언어)
-        result = translator.translate(text, src='ko', dest=target_language)
+        result = translator.translate(text, src='ko', dest=google_lang_code)
         translated_text = result.text
         
         app.logger.info(f"번역 완료: '{text}' → '{translated_text}' ({target_language})")
@@ -144,17 +142,10 @@ def translate_text(text, target_language):
 def create_multilingual_metadata(korean_text):
     """
     한국어 텍스트를 모든 지원 언어로 번역
-    
-    Args:
-        korean_text: 번역할 한국어 텍스트
-    
-    Returns:
-        Dict: 언어별 번역 결과
     """
     translations = {}
     
     if not korean_text.strip():
-        # 빈 텍스트면 모든 언어에 빈 문자열 반환
         return {lang: '' for lang in SUPPORTED_LANGUAGES.keys()}
     
     for lang_code in SUPPORTED_LANGUAGES.keys():
@@ -162,7 +153,6 @@ def create_multilingual_metadata(korean_text):
             translated = translate_text(korean_text, lang_code)
             translations[lang_code] = translated
             
-            # API 제한 방지를 위한 짧은 대기
             if lang_code != 'ko':
                 time.sleep(0.2)
                 
@@ -185,9 +175,11 @@ def generate_presigned_url(key, expires_in=86400):
         ExpiresIn=expires_in
     )
 
+# ==== 수정된 한국어 폰트 함수들 ====
+
 def download_korean_font():
     """
-    Railway 환경에서 한국어 폰트 다운로드 및 설정
+    Railway 환경에서 안정적인 한국어 폰트 다운로드
     """
     font_dir = Path("fonts")
     font_dir.mkdir(exist_ok=True)
@@ -197,221 +189,297 @@ def download_korean_font():
     if font_path.exists():
         return str(font_path)
     
-    try:
-        font_url = "https://fonts.gstatic.com/s/notosanskr/v27/PbykFmXiEBPT4ITbgNA5Cgm20xz64px_1hVWr0wuPNGmlQNMEfD4.ttf"
-        app.logger.info("📥 한국어 폰트 다운로드 중...")
-        urllib.request.urlretrieve(font_url, font_path)
-        app.logger.info(f"✅ 폰트 다운로드 완료: {font_path}")
-        return str(font_path)
-    except Exception as e:
-        app.logger.error(f"❌ 폰트 다운로드 실패: {e}")
-        return None
+    # 여러 폰트 URL 시도
+    font_urls = [
+        # GitHub에서 직접 다운로드 (더 안정적)
+        "https://github.com/notofonts/noto-cjk/raw/main/Sans/SubsetOTF/TC/NotoSansCJKtc-Regular.otf",
+        "https://github.com/notofonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf",
+        # 백업 URL
+        "https://fonts.gstatic.com/s/notosans/v28/o-0IIpQlx3QUlC5A4PNb4j5Ba_2c7A.ttf"
+    ]
+    
+    for i, font_url in enumerate(font_urls):
+        try:
+            app.logger.info(f"📥 한국어 폰트 다운로드 시도 {i+1}/{len(font_urls)}: {font_url}")
+            urllib.request.urlretrieve(font_url, font_path)
+            
+            # 파일이 실제로 다운로드되었는지 확인
+            if font_path.exists() and font_path.stat().st_size > 1024:  # 최소 1KB
+                app.logger.info(f"✅ 폰트 다운로드 완료: {font_path}")
+                return str(font_path)
+            else:
+                font_path.unlink(missing_ok=True)  # 실패한 파일 삭제
+                
+        except Exception as e:
+            app.logger.warning(f"❌ 폰트 다운로드 실패 ({i+1}): {e}")
+            font_path.unlink(missing_ok=True)
+    
+    app.logger.error("❌ 모든 폰트 다운로드 시도 실패")
+    return None
 
 def get_korean_font(size=24):
     """
-    Railway 환경에서 한국어 폰트 로드
+    Railway 환경에서 안전한 한국어 폰트 로드
     """
     try:
-        # 1. 다운로드된 한국어 폰트 시도
-        korean_font_path = download_korean_font()
-        if korean_font_path and os.path.exists(korean_font_path):
-            return ImageFont.truetype(korean_font_path, size)
-        
-        # 2. Railway/Linux 환경 폰트 경로들
-        linux_korean_fonts = [
+        # 1. 시스템 폰트 우선 시도 (Railway Dockerfile에서 설치한 폰트)
+        system_fonts = [
             '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+            '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
             '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
             '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf'
         ]
         
-        for font_path in linux_korean_fonts:
+        for font_path in system_fonts:
             if os.path.exists(font_path):
                 try:
-                    return ImageFont.truetype(font_path, size)
-                except Exception:
+                    font = ImageFont.truetype(font_path, size)
+                    app.logger.info(f"✅ 시스템 폰트 사용: {font_path}")
+                    return font
+                except Exception as e:
+                    app.logger.warning(f"시스템 폰트 로드 실패 {font_path}: {e}")
                     continue
         
+        # 2. 다운로드한 폰트 시도
+        korean_font_path = download_korean_font()
+        if korean_font_path and os.path.exists(korean_font_path):
+            try:
+                font = ImageFont.truetype(korean_font_path, size)
+                app.logger.info(f"✅ 다운로드 폰트 사용: {korean_font_path}")
+                return font
+            except Exception as e:
+                app.logger.warning(f"다운로드 폰트 로드 실패: {e}")
+        
+        # 3. 폴백: 기본 폰트 (한국어 지원 안 됨)
         app.logger.warning("⚠️ 한국어 폰트를 찾을 수 없어 기본 폰트 사용")
         return ImageFont.load_default()
         
     except Exception as e:
-        app.logger.error(f"폰트 로드 실패: {e}")
+        app.logger.error(f"폰트 로드 중 심각한 오류: {e}")
         return ImageFont.load_default()
 
 def get_text_dimensions(text, font, draw):
-    """텍스트 크기 계산 (Pillow 버전 호환성)"""
+    """
+    안전한 텍스트 크기 계산 (유니코드 오류 방지)
+    """
     try:
+        # 한국어 텍스트가 기본 폰트에서 오류나는 경우 처리
         bbox = draw.textbbox((0, 0), text, font=font)
         return bbox[2] - bbox[0], bbox[3] - bbox[1]
-    except AttributeError:
-        return draw.textsize(text, font=font)
+    except (UnicodeEncodeError, AttributeError) as e:
+        app.logger.warning(f"텍스트 크기 계산 오류: {e}, 폴백 사용")
+        try:
+            # 구버전 Pillow 방식 시도
+            return draw.textsize(text, font=font)
+        except (UnicodeEncodeError, AttributeError):
+            # 최후 수단: 대략적인 크기 계산
+            char_width = 12  # 평균 문자 폭
+            char_height = size if hasattr(font, 'size') else 24
+            return len(text) * char_width, char_height
 
 def split_korean_text(text, font, max_width, draw):
-    """한국어 텍스트를 폭에 맞게 분할"""
-    words = text.split()
-    lines = []
-    current_line = ""
-    
-    for word in words:
-        test_line = current_line + (" " if current_line else "") + word
-        test_width, _ = get_text_dimensions(test_line, font, draw)
+    """
+    안전한 한국어 텍스트 분할 (유니코드 오류 방지)
+    """
+    try:
+        words = text.split()
+        lines = []
+        current_line = ""
         
-        if test_width <= max_width:
-            current_line = test_line
-        else:
-            if current_line:
-                lines.append(current_line)
-                current_line = word
+        for word in words:
+            test_line = current_line + (" " if current_line else "") + word
+            
+            try:
+                test_width, _ = get_text_dimensions(test_line, font, draw)
+            except Exception as e:
+                app.logger.warning(f"텍스트 폭 계산 실패: {e}")
+                # 문자 수로 대략 계산
+                if len(test_line) * 12 <= max_width:  # 평균 문자폭 12px
+                    test_width = len(test_line) * 12
+                else:
+                    test_width = max_width + 1  # 강제로 줄바꿈
+            
+            if test_width <= max_width:
+                current_line = test_line
             else:
-                # 단어가 너무 긴 경우 강제 분할
-                while word:
-                    test_width, _ = get_text_dimensions(word, font, draw)
-                    if test_width <= max_width:
-                        lines.append(word)
-                        break
-                    # 글자 단위로 분할
-                    for i in range(len(word), 0, -1):
-                        substr = word[:i]
-                        test_width, _ = get_text_dimensions(substr, font, draw)
-                        if test_width <= max_width:
-                            lines.append(substr)
-                            word = word[i:]
+                if current_line:
+                    lines.append(current_line)
+                    current_line = word
+                else:
+                    # 단어가 너무 긴 경우 강제 분할
+                    while word:
+                        try:
+                            word_width, _ = get_text_dimensions(word, font, draw)
+                        except:
+                            word_width = len(word) * 12
+                            
+                        if word_width <= max_width:
+                            lines.append(word)
                             break
-                current_line = ""
-    
-    if current_line:
-        lines.append(current_line)
-    
-    return lines
+                        
+                        # 글자 단위로 분할
+                        for i in range(len(word), 0, -1):
+                            substr = word[:i]
+                            try:
+                                substr_width, _ = get_text_dimensions(substr, font, draw)
+                            except:
+                                substr_width = len(substr) * 12
+                                
+                            if substr_width <= max_width:
+                                lines.append(substr)
+                                word = word[i:]
+                                break
+                    current_line = ""
+        
+        if current_line:
+            lines.append(current_line)
+        
+        return lines
+        
+    except Exception as e:
+        app.logger.error(f"텍스트 분할 중 오류: {e}")
+        # 안전한 폴백: 단순 분할
+        max_chars = max(1, max_width // 12)  # 대략적인 문자 수
+        return [text[i:i+max_chars] for i in range(0, len(text), max_chars)]
 
 def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size_ratio=0.25, lecture_title=""):
     """
-    개선된 QR 코드 생성 - Railway 환경 최적화 (한국어 폰트 지원)
-    
-    Args:
-        link_url: QR 코드에 담을 URL
-        output_path: 저장할 경로
-        logo_path: 로고 이미지 경로
-        size_ratio: 로고 크기 비율
-        lecture_title: 하단에 표시할 강의명
+    안전한 QR 코드 생성 - Railway 환경 최적화 (오류 방지)
     """
     from PIL import ImageDraw, ImageFont
     
-    # QR 코드 생성 (더 큰 크기와 높은 오류 복구)
-    qr = qrcode.QRCode(
-        version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_H,
-        box_size=12,  # 박스 크기 증가
-        border=4,
-    )
-    qr.add_data(link_url)
-    qr.make(fit=True)
-    
-    # QR 이미지 생성 및 크기 조정
-    qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-    qr_size = 500  # 고정 크기로 더 크게
-    qr_img = qr_img.resize((qr_size, qr_size), Image.LANCZOS)
-    qr_w, qr_h = qr_img.size
+    try:
+        # QR 코드 생성
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_H,
+            box_size=12,
+            border=4,
+        )
+        qr.add_data(link_url)
+        qr.make(fit=True)
+        
+        # QR 이미지 생성
+        qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        qr_size = 500
+        qr_img = qr_img.resize((qr_size, qr_size), Image.LANCZOS)
+        qr_w, qr_h = qr_img.size
 
-    # 로고 삽입
-    if os.path.exists(logo_path):
-        try:
-            logo = Image.open(logo_path)
-            logo_size = int(qr_w * size_ratio)
-            logo = logo.resize((logo_size, logo_size), Image.LANCZOS)
-            pos = ((qr_w - logo_size) // 2, (qr_h - logo_size) // 2)
-            qr_img.paste(logo, pos, mask=(logo if logo.mode == 'RGBA' else None))
-        except Exception as e:
-            app.logger.warning(f"로고 삽입 실패: {e}")
+        # 로고 삽입 (선택사항)
+        if os.path.exists(logo_path):
+            try:
+                logo = Image.open(logo_path)
+                logo_size = int(qr_w * size_ratio)
+                logo = logo.resize((logo_size, logo_size), Image.LANCZOS)
+                pos = ((qr_w - logo_size) // 2, (qr_h - logo_size) // 2)
+                qr_img.paste(logo, pos, mask=(logo if logo.mode == 'RGBA' else None))
+            except Exception as e:
+                app.logger.warning(f"로고 삽입 실패: {e}")
 
-    # 강의명 텍스트 추가 (개선된 한국어 지원)
-    if lecture_title.strip():
-        # 텍스트 영역을 충분히 크게 설정
-        text_height = int(qr_h * 0.3)  # QR 코드 높이의 30%
-        margin = int(qr_h * 0.04)      # 여백 4%
-        
-        # 새 이미지 생성
-        total_height = qr_h + text_height + margin
-        final_img = Image.new('RGB', (qr_w, total_height), 'white')
-        final_img.paste(qr_img, (0, 0))
-        
-        # 텍스트 그리기 준비
-        draw = ImageDraw.Draw(final_img)
-        
-        # 한국어 폰트 로드 (충분히 큰 크기)
-        base_font_size = max(28, int(text_height * 0.18))  # 최소 28px
-        font = get_korean_font(base_font_size)
-        
-        # 텍스트 영역 계산
-        max_width = qr_w - 60  # 좌우 여백 30px씩
-        
-        # 텍스트를 여러 줄로 분할
-        lines = split_korean_text(lecture_title, font, max_width, draw)
-        
-        # 3줄 이상이면 폰트 크기 조정
-        if len(lines) > 3:
-            font_size = max(22, int(base_font_size * 0.75))
-            font = get_korean_font(font_size)
-            lines = split_korean_text(lecture_title, font, max_width, draw)
-            
-            # 여전히 3줄 이상이면 자르기
-            if len(lines) > 3:
-                lines = lines[:2]
-                last_line = lines[1]
-                while True:
-                    test_text = last_line + "..."
-                    test_width, _ = get_text_dimensions(test_text, font, draw)
-                    if test_width <= max_width or len(last_line) <= 3:
-                        lines[1] = test_text
-                        break
-                    last_line = last_line[:-1]
-        
-        # 최대 3줄로 제한
-        lines = lines[:3]
-        
-        # 텍스트 배치 계산
-        _, line_height = get_text_dimensions("한글Ag", font, draw)
-        total_text_height = len(lines) * line_height + (len(lines) - 1) * 8  # 줄간격 8px
-        text_y_start = qr_h + margin + (text_height - total_text_height) // 2
-        
-        # 텍스트 그리기
-        for i, line in enumerate(lines):
-            if not line.strip():
-                continue
+        # 강의명 텍스트 추가 (안전 모드)
+        if lecture_title.strip():
+            try:
+                text_height = int(qr_h * 0.25)  # 줄임 (30% → 25%)
+                margin = int(qr_h * 0.04)
                 
-            text_width, _ = get_text_dimensions(line, font, draw)
-            text_x = (qr_w - text_width) // 2  # 중앙 정렬
-            text_y = text_y_start + (i * (line_height + 8))
+                total_height = qr_h + text_height + margin
+                final_img = Image.new('RGB', (qr_w, total_height), 'white')
+                final_img.paste(qr_img, (0, 0))
+                
+                draw = ImageDraw.Draw(final_img)
+                
+                # 안전한 폰트 로드
+                base_font_size = max(20, int(text_height * 0.15))  # 줄임 (28px → 20px)
+                font = get_korean_font(base_font_size)
+                
+                max_width = qr_w - 60
+                
+                # 안전한 텍스트 분할
+                lines = split_korean_text(lecture_title, font, max_width, draw)
+                
+                # 줄 수 제한
+                if len(lines) > 3:
+                    lines = lines[:2]
+                    if len(lines) > 1:
+                        lines[1] = lines[1][:20] + "..."  # 안전한 길이 제한
+                
+                # 텍스트 배치
+                try:
+                    _, line_height = get_text_dimensions("한글Ag", font, draw)
+                except:
+                    line_height = base_font_size
+                
+                total_text_height = len(lines) * line_height + (len(lines) - 1) * 8
+                text_y_start = qr_h + margin + (text_height - total_text_height) // 2
+                
+                # 텍스트 그리기
+                for i, line in enumerate(lines):
+                    if not line.strip():
+                        continue
+                    
+                    try:
+                        text_width, _ = get_text_dimensions(line, font, draw)
+                        text_x = (qr_w - text_width) // 2
+                        text_y = text_y_start + (i * (line_height + 8))
+                        
+                        # 외곽선 (선택사항)
+                        outline_offset = 1  # 줄임
+                        for dx in [-outline_offset, 0, outline_offset]:
+                            for dy in [-outline_offset, 0, outline_offset]:
+                                if dx != 0 or dy != 0:
+                                    try:
+                                        draw.text((text_x + dx, text_y + dy), line, font=font, fill='white')
+                                    except UnicodeEncodeError:
+                                        pass  # 외곽선 실패해도 무시
+                        
+                        # 메인 텍스트
+                        try:
+                            draw.text((text_x, text_y), line, font=font, fill='black')
+                        except UnicodeEncodeError:
+                            # 한국어 렌더링 실패 시 영어로 대체
+                            fallback_text = f"Lecture {i+1}"
+                            draw.text((text_x, text_y), fallback_text, font=font, fill='black')
+                            
+                    except Exception as text_error:
+                        app.logger.warning(f"텍스트 렌더링 실패 (줄 {i}): {text_error}")
+                
+                # 고품질 저장
+                final_img.save(output_path, quality=90, optimize=True)
+                app.logger.info(f"✅ 안전한 QR 코드 생성 완료: {lecture_title}")
+                
+            except Exception as text_error:
+                app.logger.warning(f"텍스트 추가 실패, QR만 저장: {text_error}")
+                qr_img.save(output_path, quality=90, optimize=True)
+                
+        else:
+            # 강의명이 없으면 QR 코드만 저장
+            qr_img.save(output_path, quality=90, optimize=True)
+            app.logger.info("✅ QR 코드 생성 완료 (강의명 없음)")
             
-            # 가독성을 위한 흰색 외곽선 (선택사항)
-            outline_offset = 2
-            for dx in [-outline_offset, 0, outline_offset]:
-                for dy in [-outline_offset, 0, outline_offset]:
-                    if dx != 0 or dy != 0:
-                        draw.text((text_x + dx, text_y + dy), line, font=font, fill='white')
-            
-            # 메인 텍스트 (검은색)
-            draw.text((text_x, text_y), line, font=font, fill='black')
-        
-        # 고품질로 저장
-        final_img.save(output_path, quality=95, optimize=True, dpi=(300, 300))
-        app.logger.info(f"✅ 개선된 QR 코드 생성 완료: {lecture_title} (크기: {qr_w}x{total_height})")
-        
-    else:
-        # 강의명이 없으면 QR 코드만 저장
-        qr_img.save(output_path, quality=95, optimize=True)
-        app.logger.info("✅ QR 코드 생성 완료 (강의명 없음)")
+    except Exception as e:
+        app.logger.error(f"❌ QR 코드 생성 실패: {e}")
+        # 최후 수단: 간단한 QR 코드만 생성
+        try:
+            simple_qr = qrcode.make(link_url)
+            simple_qr.save(output_path)
+            app.logger.info("✅ 간단 QR 코드로 대체 생성 완료")
+        except Exception as final_error:
+            app.logger.error(f"❌ 간단 QR 코드도 실패: {final_error}")
+            raise
 
 def initialize_korean_fonts():
-    """앱 시작 시 한국어 폰트 환경 초기화"""
+    """안전한 한국어 폰트 환경 초기화"""
     try:
         font_dir = Path("fonts")
         font_dir.mkdir(exist_ok=True)
         
-        # 한국어 폰트 미리 다운로드
-        download_korean_font()
+        # 폰트 다운로드 시도 (실패해도 계속 진행)
+        try:
+            download_korean_font()
+        except Exception as e:
+            app.logger.warning(f"폰트 다운로드 실패, 계속 진행: {e}")
         
-        app.logger.info("✅ 한국어 폰트 환경 초기화 완료")
+        app.logger.info("✅ 한국어 폰트 환경 초기화 완료 (안전 모드)")
         return True
     except Exception as e:
         app.logger.error(f"❌ 한국어 폰트 초기화 실패: {e}")
@@ -1196,42 +1264,389 @@ def watch(group_id):
     if requested_lang not in SUPPORTED_LANGUAGES:
         requested_lang = 'ko'
     
-    # 비디오 데이터 조회 (번역 포함)
-    video_data = get_video_with_translation(group_id, requested_lang)
-    if not video_data:
-        abort(404)
-
-    # Presigned URL 갱신 로직 (기존과 동일)
-    current_presigned = video_data.get('presigned_url', '')
-    if not current_presigned or is_presigned_url_expired(current_presigned, 60):
-        new_presigned_url = generate_presigned_url(video_data['video_key'], expires_in=604800)
-        
-        # 루트 문서만 업데이트
-        db.collection('uploads').document(group_id).update({
-            'presigned_url': new_presigned_url,
-            'updated_at': datetime.utcnow().isoformat()
-        })
-        video_data['presigned_url'] = new_presigned_url
-
-    # QR URL도 갱신 확인
-    current_qr_url = video_data.get('qr_presigned_url', '')
-    qr_key = video_data.get('qr_key', '')
-    if qr_key and (not current_qr_url or is_presigned_url_expired(current_qr_url, 60)):
-        new_qr_url = generate_presigned_url(qr_key, expires_in=604800)
-        db.collection('uploads').document(group_id).update({
-            'qr_presigned_url': new_qr_url,
-            'qr_updated_at': datetime.utcnow().isoformat()
-        })
-        video_data['qr_presigned_url'] = new_qr_url
+    # User-Agent 확인하여 Flutter 앱인지 감지
+    user_agent = request.headers.get('User-Agent', '').lower()
+    is_flutter_app = 'flutter' in user_agent or 'dart' in user_agent
     
-    # 템플릿에 번역된 데이터 전달
-    return render_template(
-        'watch.html',
-        video_url=video_data['presigned_url'],
-        video_data=video_data,
-        available_languages=SUPPORTED_LANGUAGES,
-        current_language=requested_lang
-    )
+    if is_flutter_app:
+        # Flutter 앱인 경우 JSON 응답으로 비디오 정보 반환
+        video_data = get_video_with_translation(group_id, requested_lang)
+        if not video_data:
+            return jsonify({'error': 'Video not found'}), 404
+        
+        # URL 갱신
+        current_presigned = video_data.get('presigned_url', '')
+        if not current_presigned or is_presigned_url_expired(current_presigned, 60):
+            new_presigned_url = generate_presigned_url(video_data['video_key'], expires_in=604800)
+            db.collection('uploads').document(group_id).update({
+                'presigned_url': new_presigned_url,
+                'updated_at': datetime.utcnow().isoformat()
+            })
+            video_data['presigned_url'] = new_presigned_url
+        
+        return jsonify({
+            'groupId': group_id,
+            'title': video_data['display_title'],
+            'main_category': video_data['display_main_category'],
+            'sub_category': video_data['display_sub_category'],
+            'video_url': video_data['presigned_url'],
+            'qr_url': video_data.get('qr_presigned_url', ''),
+            'language': requested_lang,
+            'time': video_data.get('time', '0:00'),
+            'level': video_data.get('level', ''),
+            'tag': video_data.get('tag', '')
+        })
+    else:
+        # 웹 브라우저인 경우 기존 HTML 템플릿 렌더링
+        video_data = get_video_with_translation(group_id, requested_lang)
+        if not video_data:
+            abort(404)
+        
+        # URL 갱신 로직 (기존과 동일)
+        current_presigned = video_data.get('presigned_url', '')
+        if not current_presigned or is_presigned_url_expired(current_presigned, 60):
+            new_presigned_url = generate_presigned_url(video_data['video_key'], expires_in=604800)
+            db.collection('uploads').document(group_id).update({
+                'presigned_url': new_presigned_url,
+                'updated_at': datetime.utcnow().isoformat()
+            })
+            video_data['presigned_url'] = new_presigned_url
+        
+        # QR URL도 갱신 확인
+        current_qr_url = video_data.get('qr_presigned_url', '')
+        qr_key = video_data.get('qr_key', '')
+        if qr_key and (not current_qr_url or is_presigned_url_expired(current_qr_url, 60)):
+            new_qr_url = generate_presigned_url(qr_key, expires_in=604800)
+            db.collection('uploads').document(group_id).update({
+                'qr_presigned_url': new_qr_url,
+                'qr_updated_at': datetime.utcnow().isoformat()
+            })
+            video_data['qr_presigned_url'] = new_qr_url
+        
+        # 템플릿에 번역된 데이터 전달
+        return render_template(
+            'watch.html',
+            video_url=video_data['presigned_url'],
+            video_data=video_data,
+            available_languages=SUPPORTED_LANGUAGES,
+            current_language=requested_lang
+        )
+
+# ===================================================================
+# Flutter용 추가 API 엔드포인트들
+# ===================================================================
+
+@app.route('/api/videos/search', methods=['GET'])
+def search_videos_multilingual():
+    """
+    Flutter 앱의 검색 기능용 다국어 비디오 검색 API
+    Query params:
+    - q: 검색어
+    - lang: 언어 코드 (기본값: ko)
+    - limit: 결과 개수 제한 (기본값: 50)
+    """
+    query = request.args.get('q', '').strip()
+    lang_code = request.args.get('lang', 'ko')
+    limit = int(request.args.get('limit', 50))
+    
+    if not query:
+        return jsonify({'videos': [], 'total': 0, 'query': query})
+    
+    if lang_code not in SUPPORTED_LANGUAGES:
+        lang_code = 'ko'
+    
+    try:
+        # Firestore에서 모든 업로드 문서 조회
+        uploads_ref = db.collection('uploads')
+        docs = uploads_ref.stream()
+        
+        matched_videos = []
+        
+        for doc in docs:
+            root_data = doc.to_dict()
+            group_id = doc.id
+            
+            # 번역 문서 조회
+            translation_doc = doc.reference.collection('translations').document(lang_code).get()
+            
+            # 검색 매칭 확인
+            is_match = False
+            display_title = root_data.get('group_name', '')
+            display_main_category = root_data.get('main_category', '')
+            display_sub_category = root_data.get('sub_category', '')
+            display_sub_sub_category = root_data.get('sub_sub_category', '')
+            
+            if translation_doc.exists:
+                translation_data = translation_doc.to_dict()
+                display_title = translation_data.get('title', display_title)
+                display_main_category = translation_data.get('main_category', display_main_category)
+                display_sub_category = translation_data.get('sub_category', display_sub_category)
+                display_sub_sub_category = translation_data.get('sub_sub_category', display_sub_sub_category)
+            
+            # 제목, 카테고리에서 검색
+            search_fields = [display_title, display_main_category, display_sub_category, display_sub_sub_category]
+            for field in search_fields:
+                if query.lower() in field.lower():
+                    is_match = True
+                    break
+            
+            if is_match:
+                # URL 갱신 확인
+                current_presigned = root_data.get('presigned_url', '')
+                if not current_presigned or is_presigned_url_expired(current_presigned, 60):
+                    new_presigned_url = generate_presigned_url(root_data['video_key'], expires_in=604800)
+                    doc.reference.update({
+                        'presigned_url': new_presigned_url,
+                        'updated_at': datetime.utcnow().isoformat()
+                    })
+                    video_url = new_presigned_url
+                else:
+                    video_url = current_presigned
+                
+                matched_videos.append({
+                    'groupId': group_id,
+                    'title': display_title,
+                    'main_category': display_main_category,
+                    'sub_category': display_sub_category,
+                    'sub_sub_category': display_sub_sub_category,
+                    'level': root_data.get('level', ''),
+                    'time': root_data.get('time', '0:00'),
+                    'tag': root_data.get('tag', ''),
+                    'upload_date': root_data.get('upload_date', ''),
+                    'video_url': video_url,
+                    'qr_url': root_data.get('qr_presigned_url', ''),
+                    'language': lang_code
+                })
+        
+        # 제한된 결과 반환
+        limited_results = matched_videos[:limit]
+        
+        return jsonify({
+            'videos': limited_results,
+            'total': len(limited_results),
+            'query': query,
+            'language': lang_code,
+            'language_name': SUPPORTED_LANGUAGES[lang_code]
+        })
+        
+    except Exception as e:
+        app.logger.error(f"비디오 검색 실패: {e}")
+        return jsonify({'error': '검색 중 오류가 발생했습니다.'}), 500
+
+@app.route('/api/videos/category/<category>', methods=['GET'])
+def get_videos_by_category(category):
+    """
+    특정 카테고리의 비디오 목록 조회 (Flutter LectureListScreen용)
+    Path params:
+    - category: 카테고리명
+    Query params:
+    - lang: 언어 코드 (기본값: ko)
+    """
+    lang_code = request.args.get('lang', 'ko')
+    
+    if lang_code not in SUPPORTED_LANGUAGES:
+        lang_code = 'ko'
+    
+    try:
+        # 모든 업로드 문서 조회
+        uploads_ref = db.collection('uploads')
+        docs = uploads_ref.stream()
+        
+        category_videos = []
+        
+        for doc in docs:
+            root_data = doc.to_dict()
+            group_id = doc.id
+            
+            # 번역 문서 조회
+            translation_doc = doc.reference.collection('translations').document(lang_code).get()
+            
+            # 카테고리 매칭 확인
+            check_categories = [
+                root_data.get('main_category', ''),
+                root_data.get('sub_category', ''),
+                root_data.get('sub_sub_category', '')
+            ]
+            
+            if translation_doc.exists:
+                translation_data = translation_doc.to_dict()
+                check_categories.extend([
+                    translation_data.get('main_category', ''),
+                    translation_data.get('sub_category', ''),
+                    translation_data.get('sub_sub_category', '')
+                ])
+            
+            # 카테고리 매칭
+            if any(category.lower() in cat.lower() for cat in check_categories if cat):
+                # URL 갱신
+                current_presigned = root_data.get('presigned_url', '')
+                if not current_presigned or is_presigned_url_expired(current_presigned, 60):
+                    new_presigned_url = generate_presigned_url(root_data['video_key'], expires_in=604800)
+                    doc.reference.update({
+                        'presigned_url': new_presigned_url,
+                        'updated_at': datetime.utcnow().isoformat()
+                    })
+                    video_url = new_presigned_url
+                else:
+                    video_url = current_presigned
+                
+                # 번역된 데이터 사용
+                display_data = get_video_with_translation(group_id, lang_code)
+                if display_data:
+                    category_videos.append({
+                        'groupId': group_id,
+                        'title': display_data['display_title'],
+                        'main_category': display_data['display_main_category'],
+                        'sub_category': display_data['display_sub_category'],
+                        'sub_sub_category': display_data['display_sub_sub_category'],
+                        'level': display_data.get('level', ''),
+                        'time': display_data.get('time', '0:00'),
+                        'tag': display_data.get('tag', ''),
+                        'upload_date': display_data.get('upload_date', ''),
+                        'video_url': video_url,
+                        'qr_url': display_data.get('qr_presigned_url', ''),
+                        'language': lang_code
+                    })
+        
+        return jsonify({
+            'videos': category_videos,
+            'category': category,
+            'total': len(category_videos),
+            'language': lang_code,
+            'language_name': SUPPORTED_LANGUAGES[lang_code]
+        })
+        
+    except Exception as e:
+        app.logger.error(f"카테고리별 비디오 조회 실패: {e}")
+        return jsonify({'error': '비디오 조회 중 오류가 발생했습니다.'}), 500
+
+@app.route('/api/user/lectures', methods=['GET'])
+def get_user_lectures():
+    """
+    현재 사용자가 신청한 강의 목록 조회
+    Headers: Authorization: Bearer <firebase_id_token>
+    """
+    try:
+        # Firebase ID 토큰 검증 (실제 구현 시 필요)
+        auth_header = request.headers.get('Authorization', '')
+        if not auth_header.startswith('Bearer '):
+            return jsonify({'error': '인증이 필요합니다.'}), 401
+        
+        # 여기서는 간단히 uid를 받는다고 가정
+        uid = request.args.get('uid')
+        if not uid:
+            return jsonify({'error': 'UID가 필요합니다.'}), 400
+        
+        # 사용자 문서에서 availableLectures 조회
+        user_doc = db.collection('users').document(uid).get()
+        
+        if not user_doc.exists:
+            return jsonify({'lectures': [], 'total': 0})
+        
+        user_data = user_doc.to_dict()
+        available_lectures = user_data.get('availableLectures', [])
+        
+        # 각 강의의 상세 정보 조회
+        lecture_details = []
+        lang_code = request.args.get('lang', 'ko')
+        
+        for lecture_id in available_lectures:
+            lecture_data = get_video_with_translation(lecture_id, lang_code)
+            if lecture_data:
+                lecture_details.append({
+                    'groupId': lecture_id,
+                    'title': lecture_data['display_title'],
+                    'main_category': lecture_data['display_main_category'],
+                    'sub_category': lecture_data['display_sub_category'],
+                    'level': lecture_data.get('level', ''),
+                    'time': lecture_data.get('time', '0:00'),
+                    'video_url': lecture_data.get('presigned_url', ''),
+                    'qr_url': lecture_data.get('qr_presigned_url', ''),
+                })
+        
+        return jsonify({
+            'lectures': lecture_details,
+            'total': len(lecture_details),
+            'user_uid': uid,
+            'language': lang_code
+        })
+        
+    except Exception as e:
+        app.logger.error(f"사용자 강의 조회 실패: {e}")
+        return jsonify({'error': '강의 조회 중 오류가 발생했습니다.'}), 500
+
+@app.route('/api/user/lectures', methods=['POST'])
+def apply_for_lectures():
+    """
+    사용자 강의 신청 API
+    Body: { "uid": "user_uid", "lecture_ids": ["group_id1", "group_id2"] }
+    """
+    try:
+        data = request.get_json() or {}
+        uid = data.get('uid')
+        lecture_ids = data.get('lecture_ids', [])
+        
+        if not uid or not lecture_ids:
+            return jsonify({'error': 'UID와 강의 ID가 필요합니다.'}), 400
+        
+        # Firestore에 강의 신청 정보 저장
+        user_ref = db.collection('users').document(uid)
+        user_ref.set({
+            'availableLectures': firestore.ArrayUnion(lecture_ids),
+            'lastUpdated': firestore.SERVER_TIMESTAMP,
+        }, merge=True)
+        
+        return jsonify({
+            'message': '강의 신청이 완료되었습니다.',
+            'applied_lectures': lecture_ids,
+            'user_uid': uid
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"강의 신청 실패: {e}")
+        return jsonify({'error': '강의 신청 중 오류가 발생했습니다.'}), 500
+
+@app.route('/api/categories', methods=['GET'])
+def get_categories():
+    """
+    다국어 카테고리 구조 반환 (Flutter 앱의 하드코딩 대신 사용)
+    Query params:
+    - lang: 언어 코드 (기본값: ko)
+    """
+    lang_code = request.args.get('lang', 'ko')
+    
+    if lang_code not in SUPPORTED_LANGUAGES:
+        lang_code = 'ko'
+    
+    # 각 언어별 카테고리 매핑 (Flutter 앱과 동일한 구조)
+    categories_ko = {
+        'main_categories': ['전체', '기계', '공구', '장비'],
+        'sub_categories': {
+            '전체': ['건설기계', '공작기계', '산업기계', '제조기계', '수공구', '전동공구', '절삭공구', '측정공구', '안전장비', '운송장비'],
+            '기계': ['건설기계', '공작기계', '산업기계', '제조기계'],
+            '공구': ['수공구', '전동공구', '절삭공구', '측정공구'],
+            '장비': ['안전장비', '운송장비']
+        },
+        'leaf_categories': {
+            '건설기계': ['불도저', '크레인', '굴착기'],
+            '공작기계': ['CNC 선반', '절삭기', '연삭기'],
+            '산업기계': ['유압 프레스', '컨베이어 시스템', '굴착기'],
+            '제조기계': ['사출 성형기', '프레스기', '열성형기'],
+            '수공구': ['드릴', '해머', '플라이어'],
+            '전동공구': ['그라인더', '전동 톱', '해머드릴'],
+            '절삭공구': ['커터', '플라즈마 노즐', '드릴 비트'],
+            '측정공구': ['캘리퍼스', '하이트 게이지', '마이크로미터'],
+            '안전장비': ['헬멧', '방진 마스크', '낙하 방지벨트', '안전모', '안전화', '보호안경', '귀마개', '보호장갑', '호흡 보호구'],
+            '운송장비': ['리프팅 장비', '체인 블록', '호이스트']
+        }
+    }
+    
+    return jsonify({
+        'categories': categories_ko,
+        'language': lang_code,
+        'language_name': SUPPORTED_LANGUAGES[lang_code],
+        'supported_languages': SUPPORTED_LANGUAGES
+    })
 
 # ===================================================================
 # 다국어 API 엔드포인트들
@@ -1600,22 +2015,6 @@ def generate_selected_zip():
 def migrate_to_subcollections():
     """
     관리자용: 기존 translations 필드를 서브컬렉션으로 마이그레이션
-    
-    기존 구조:
-    uploads/{group_id} {
-        translations: {
-            title: { ko: "...", en: "...", ... },
-            main_category: { ko: "...", en: "...", ... }
-        }
-    }
-    
-    새 구조:
-    uploads/{group_id}/translations/{lang_code} {
-        title: "...",
-        main_category: "...",
-        language_code: "...",
-        language_name: "..."
-    }
     """
     try:
         # 모든 업로드 문서 조회
@@ -1794,10 +2193,13 @@ def health_check():
             'scheduler': scheduler.running if 'scheduler' in globals() else False
         },
         'supported_languages': list(SUPPORTED_LANGUAGES.keys()),
-        'version': '2.0.0-improved'
+        'version': '2.1.0-fixed'
     }), 200 if overall_status == 'healthy' else 503
 
-# Railway 환경을 위한 초기화 함수
+# ===================================================================
+# Railway 환경 초기화
+# ===================================================================
+
 def initialize_railway_environment():
     """Railway 배포 환경 초기화"""
     try:
@@ -1813,512 +2215,12 @@ def initialize_railway_environment():
             import logging
             app.logger.setLevel(logging.INFO)
         
-        app.logger.info("🚂 Railway 환경 초기화 완료")
+        app.logger.info("🚂 Railway 환경 초기화 완료 (안전 모드)")
         return True
         
     except Exception as e:
         app.logger.error(f"❌ Railway 환경 초기화 실패: {e}")
         return False
-# Flutter 앱에서 필요한 누락된 API 엔드포인트들
-# 기존 app.py에 추가해야 할 엔드포인트들
-
-# ===================================================================
-# 1. 다국어 비디오 검색 API (Flutter 검색 기능용)
-# ===================================================================
-
-@app.route('/api/videos/search', methods=['GET'])
-def search_videos_multilingual():
-    """
-    Flutter 앱의 검색 기능용 다국어 비디오 검색 API
-    Query params:
-    - q: 검색어
-    - lang: 언어 코드 (기본값: ko)
-    - limit: 결과 개수 제한 (기본값: 50)
-    """
-    query = request.args.get('q', '').strip()
-    lang_code = request.args.get('lang', 'ko')
-    limit = int(request.args.get('limit', 50))
-    
-    if not query:
-        return jsonify({'videos': [], 'total': 0, 'query': query})
-    
-    if lang_code not in SUPPORTED_LANGUAGES:
-        lang_code = 'ko'
-    
-    try:
-        # Firestore에서 모든 업로드 문서 조회
-        uploads_ref = db.collection('uploads')
-        docs = uploads_ref.stream()
-        
-        matched_videos = []
-        
-        for doc in docs:
-            root_data = doc.to_dict()
-            group_id = doc.id
-            
-            # 번역 문서 조회
-            translation_doc = doc.reference.collection('translations').document(lang_code).get()
-            
-            # 검색 매칭 확인
-            is_match = False
-            display_title = root_data.get('group_name', '')
-            display_main_category = root_data.get('main_category', '')
-            display_sub_category = root_data.get('sub_category', '')
-            display_sub_sub_category = root_data.get('sub_sub_category', '')
-            
-            if translation_doc.exists:
-                translation_data = translation_doc.to_dict()
-                display_title = translation_data.get('title', display_title)
-                display_main_category = translation_data.get('main_category', display_main_category)
-                display_sub_category = translation_data.get('sub_category', display_sub_category)
-                display_sub_sub_category = translation_data.get('sub_sub_category', display_sub_sub_category)
-            
-            # 제목, 카테고리에서 검색
-            search_fields = [display_title, display_main_category, display_sub_category, display_sub_sub_category]
-            for field in search_fields:
-                if query.lower() in field.lower():
-                    is_match = True
-                    break
-            
-            if is_match:
-                # URL 갱신 확인
-                current_presigned = root_data.get('presigned_url', '')
-                if not current_presigned or is_presigned_url_expired(current_presigned, 60):
-                    new_presigned_url = generate_presigned_url(root_data['video_key'], expires_in=604800)
-                    doc.reference.update({
-                        'presigned_url': new_presigned_url,
-                        'updated_at': datetime.utcnow().isoformat()
-                    })
-                    video_url = new_presigned_url
-                else:
-                    video_url = current_presigned
-                
-                matched_videos.append({
-                    'groupId': group_id,
-                    'title': display_title,
-                    'main_category': display_main_category,
-                    'sub_category': display_sub_category,
-                    'sub_sub_category': display_sub_sub_category,
-                    'level': root_data.get('level', ''),
-                    'time': root_data.get('time', '0:00'),
-                    'tag': root_data.get('tag', ''),
-                    'upload_date': root_data.get('upload_date', ''),
-                    'video_url': video_url,
-                    'qr_url': root_data.get('qr_presigned_url', ''),
-                    'language': lang_code
-                })
-        
-        # 제한된 결과 반환
-        limited_results = matched_videos[:limit]
-        
-        return jsonify({
-            'videos': limited_results,
-            'total': len(limited_results),
-            'query': query,
-            'language': lang_code,
-            'language_name': SUPPORTED_LANGUAGES[lang_code]
-        })
-        
-    except Exception as e:
-        app.logger.error(f"비디오 검색 실패: {e}")
-        return jsonify({'error': '검색 중 오류가 발생했습니다.'}), 500
-
-# ===================================================================
-# 2. 카테고리별 비디오 조회 API (Flutter 카테고리 선택용)
-# ===================================================================
-
-@app.route('/api/videos/category/<category>', methods=['GET'])
-def get_videos_by_category(category):
-    """
-    특정 카테고리의 비디오 목록 조회 (Flutter LectureListScreen용)
-    Path params:
-    - category: 카테고리명
-    Query params:
-    - lang: 언어 코드 (기본값: ko)
-    """
-    lang_code = request.args.get('lang', 'ko')
-    
-    if lang_code not in SUPPORTED_LANGUAGES:
-        lang_code = 'ko'
-    
-    try:
-        # 모든 업로드 문서 조회
-        uploads_ref = db.collection('uploads')
-        docs = uploads_ref.stream()
-        
-        category_videos = []
-        
-        for doc in docs:
-            root_data = doc.to_dict()
-            group_id = doc.id
-            
-            # 번역 문서 조회
-            translation_doc = doc.reference.collection('translations').document(lang_code).get()
-            
-            # 카테고리 매칭 확인
-            check_categories = [
-                root_data.get('main_category', ''),
-                root_data.get('sub_category', ''),
-                root_data.get('sub_sub_category', '')
-            ]
-            
-            if translation_doc.exists:
-                translation_data = translation_doc.to_dict()
-                check_categories.extend([
-                    translation_data.get('main_category', ''),
-                    translation_data.get('sub_category', ''),
-                    translation_data.get('sub_sub_category', '')
-                ])
-            
-            # 카테고리 매칭
-            if any(category.lower() in cat.lower() for cat in check_categories if cat):
-                # URL 갱신
-                current_presigned = root_data.get('presigned_url', '')
-                if not current_presigned or is_presigned_url_expired(current_presigned, 60):
-                    new_presigned_url = generate_presigned_url(root_data['video_key'], expires_in=604800)
-                    doc.reference.update({
-                        'presigned_url': new_presigned_url,
-                        'updated_at': datetime.utcnow().isoformat()
-                    })
-                    video_url = new_presigned_url
-                else:
-                    video_url = current_presigned
-                
-                # 번역된 데이터 사용
-                display_data = get_video_with_translation(group_id, lang_code)
-                if display_data:
-                    category_videos.append({
-                        'groupId': group_id,
-                        'title': display_data['display_title'],
-                        'main_category': display_data['display_main_category'],
-                        'sub_category': display_data['display_sub_category'],
-                        'sub_sub_category': display_data['display_sub_sub_category'],
-                        'level': display_data.get('level', ''),
-                        'time': display_data.get('time', '0:00'),
-                        'tag': display_data.get('tag', ''),
-                        'upload_date': display_data.get('upload_date', ''),
-                        'video_url': video_url,
-                        'qr_url': display_data.get('qr_presigned_url', ''),
-                        'language': lang_code
-                    })
-        
-        return jsonify({
-            'videos': category_videos,
-            'category': category,
-            'total': len(category_videos),
-            'language': lang_code,
-            'language_name': SUPPORTED_LANGUAGES[lang_code]
-        })
-        
-    except Exception as e:
-        app.logger.error(f"카테고리별 비디오 조회 실패: {e}")
-        return jsonify({'error': '비디오 조회 중 오류가 발생했습니다.'}), 500
-
-# ===================================================================
-# 3. 사용자 강의 신청/조회 API (Flutter 강의 신청 기능용)
-# ===================================================================
-
-@app.route('/api/user/lectures', methods=['GET'])
-def get_user_lectures():
-    """
-    현재 사용자가 신청한 강의 목록 조회
-    Headers: Authorization: Bearer <firebase_id_token>
-    """
-    try:
-        # Firebase ID 토큰 검증 (실제 구현 시 필요)
-        auth_header = request.headers.get('Authorization', '')
-        if not auth_header.startswith('Bearer '):
-            return jsonify({'error': '인증이 필요합니다.'}), 401
-        
-        # 여기서는 간단히 uid를 받는다고 가정
-        uid = request.args.get('uid')
-        if not uid:
-            return jsonify({'error': 'UID가 필요합니다.'}), 400
-        
-        # 사용자 문서에서 availableLectures 조회
-        user_doc = db.collection('users').document(uid).get()
-        
-        if not user_doc.exists:
-            return jsonify({'lectures': [], 'total': 0})
-        
-        user_data = user_doc.to_dict()
-        available_lectures = user_data.get('availableLectures', [])
-        
-        # 각 강의의 상세 정보 조회
-        lecture_details = []
-        lang_code = request.args.get('lang', 'ko')
-        
-        for lecture_id in available_lectures:
-            lecture_data = get_video_with_translation(lecture_id, lang_code)
-            if lecture_data:
-                lecture_details.append({
-                    'groupId': lecture_id,
-                    'title': lecture_data['display_title'],
-                    'main_category': lecture_data['display_main_category'],
-                    'sub_category': lecture_data['display_sub_category'],
-                    'level': lecture_data.get('level', ''),
-                    'time': lecture_data.get('time', '0:00'),
-                    'video_url': lecture_data.get('presigned_url', ''),
-                    'qr_url': lecture_data.get('qr_presigned_url', ''),
-                })
-        
-        return jsonify({
-            'lectures': lecture_details,
-            'total': len(lecture_details),
-            'user_uid': uid,
-            'language': lang_code
-        })
-        
-    except Exception as e:
-        app.logger.error(f"사용자 강의 조회 실패: {e}")
-        return jsonify({'error': '강의 조회 중 오류가 발생했습니다.'}), 500
-
-@app.route('/api/user/lectures', methods=['POST'])
-def apply_for_lectures():
-    """
-    사용자 강의 신청 API
-    Body: { "uid": "user_uid", "lecture_ids": ["group_id1", "group_id2"] }
-    """
-    try:
-        data = request.get_json() or {}
-        uid = data.get('uid')
-        lecture_ids = data.get('lecture_ids', [])
-        
-        if not uid or not lecture_ids:
-            return jsonify({'error': 'UID와 강의 ID가 필요합니다.'}), 400
-        
-        # Firestore에 강의 신청 정보 저장
-        user_ref = db.collection('users').document(uid)
-        user_ref.set({
-            'availableLectures': firestore.ArrayUnion(lecture_ids),
-            'lastUpdated': firestore.SERVER_TIMESTAMP,
-        }, merge=True)
-        
-        return jsonify({
-            'message': '강의 신청이 완료되었습니다.',
-            'applied_lectures': lecture_ids,
-            'user_uid': uid
-        }), 200
-        
-    except Exception as e:
-        app.logger.error(f"강의 신청 실패: {e}")
-        return jsonify({'error': '강의 신청 중 오류가 발생했습니다.'}), 500
-
-# ===================================================================
-# 4. 다국어 카테고리 목록 API (Flutter 카테고리 구조용)
-# ===================================================================
-
-@app.route('/api/categories', methods=['GET'])
-def get_categories():
-    """
-    다국어 카테고리 구조 반환 (Flutter 앱의 하드코딩 대신 사용)
-    Query params:
-    - lang: 언어 코드 (기본값: ko)
-    """
-    lang_code = request.args.get('lang', 'ko')
-    
-    if lang_code not in SUPPORTED_LANGUAGES:
-        lang_code = 'ko'
-    
-    # 각 언어별 카테고리 매핑 (Flutter 앱과 동일한 구조)
-    categories_ko = {
-        'main_categories': ['전체', '기계', '공구', '장비'],
-        'sub_categories': {
-            '전체': ['건설기계', '공작기계', '산업기계', '제조기계', '수공구', '전동공구', '절삭공구', '측정공구', '안전장비', '운송장비'],
-            '기계': ['건설기계', '공작기계', '산업기계', '제조기계'],
-            '공구': ['수공구', '전동공구', '절삭공구', '측정공구'],
-            '장비': ['안전장비', '운송장비']
-        },
-        'leaf_categories': {
-            '건설기계': ['불도저', '크레인', '굴착기'],
-            '공작기계': ['CNC 선반', '절삭기', '연삭기'],
-            '산업기계': ['유압 프레스', '컨베이어 시스템', '굴착기'],
-            '제조기계': ['사출 성형기', '프레스기', '열성형기'],
-            '수공구': ['드릴', '해머', '플라이어'],
-            '전동공구': ['그라인더', '전동 톱', '해머드릴'],
-            '절삭공구': ['커터', '플라즈마 노즐', '드릴 비트'],
-            '측정공구': ['캘리퍼스', '하이트 게이지', '마이크로미터'],
-            '안전장비': ['헬멧', '방진 마스크', '낙하 방지벨트', '안전모', '안전화', '보호안경', '귀마개', '보호장갑', '호흡 보호구'],
-            '운송장비': ['리프팅 장비', '체인 블록', '호이스트']
-        }
-    }
-    
-    # 다른 언어로 번역된 카테고리도 추가 가능
-    # 현재는 한국어만 제공, 필요시 번역 추가
-    
-    return jsonify({
-        'categories': categories_ko,
-        'language': lang_code,
-        'language_name': SUPPORTED_LANGUAGES[lang_code],
-        'supported_languages': SUPPORTED_LANGUAGES
-    })
-
-# ===================================================================
-# 5. QR 코드 스캔 후 리다이렉트 처리 개선
-# ===================================================================
-
-@app.route('/watch/<group_id>')
-def watch_with_language_detection(group_id):
-    """
-    QR 코드 스캔 후 Flutter 앱에서 언어 감지하여 리다이렉트
-    """
-    # 언어 파라미터 확인
-    requested_lang = request.args.get('lang', 'ko')
-    
-    # 지원하지 않는 언어면 한국어로 폴백
-    if requested_lang not in SUPPORTED_LANGUAGES:
-        requested_lang = 'ko'
-    
-    # User-Agent 확인하여 Flutter 앱인지 감지
-    user_agent = request.headers.get('User-Agent', '').lower()
-    is_flutter_app = 'flutter' in user_agent or 'dart' in user_agent
-    
-    if is_flutter_app:
-        # Flutter 앱인 경우 JSON 응답으로 비디오 정보 반환
-        video_data = get_video_with_translation(group_id, requested_lang)
-        if not video_data:
-            return jsonify({'error': 'Video not found'}), 404
-        
-        # URL 갱신
-        current_presigned = video_data.get('presigned_url', '')
-        if not current_presigned or is_presigned_url_expired(current_presigned, 60):
-            new_presigned_url = generate_presigned_url(video_data['video_key'], expires_in=604800)
-            db.collection('uploads').document(group_id).update({
-                'presigned_url': new_presigned_url,
-                'updated_at': datetime.utcnow().isoformat()
-            })
-            video_data['presigned_url'] = new_presigned_url
-        
-        return jsonify({
-            'groupId': group_id,
-            'title': video_data['display_title'],
-            'main_category': video_data['display_main_category'],
-            'sub_category': video_data['display_sub_category'],
-            'video_url': video_data['presigned_url'],
-            'qr_url': video_data.get('qr_presigned_url', ''),
-            'language': requested_lang,
-            'time': video_data.get('time', '0:00'),
-            'level': video_data.get('level', ''),
-            'tag': video_data.get('tag', '')
-        })
-    else:
-        # 웹 브라우저인 경우 기존 HTML 템플릿 렌더링
-        video_data = get_video_with_translation(group_id, requested_lang)
-        if not video_data:
-            abort(404)
-        
-        # URL 갱신 로직 (기존과 동일)
-        current_presigned = video_data.get('presigned_url', '')
-        if not current_presigned or is_presigned_url_expired(current_presigned, 60):
-            new_presigned_url = generate_presigned_url(video_data['video_key'], expires_in=604800)
-            db.collection('uploads').document(group_id).update({
-                'presigned_url': new_presigned_url,
-                'updated_at': datetime.utcnow().isoformat()
-            })
-            video_data['presigned_url'] = new_presigned_url
-        
-        return render_template(
-            'watch.html',
-            video_url=video_data['presigned_url'],
-            video_data=video_data,
-            available_languages=SUPPORTED_LANGUAGES,
-            current_language=requested_lang
-        )
-# ===================================================================
-# 앱 시작 시 스케줄러 자동 실행
-# ===================================================================
-
-if __name__ == "__main__":
-    # Railway 환경 초기화
-    initialize_railway_environment()
-    
-    # 스케줄러 시작
-    start_background_scheduler()
-    
-    port = int(os.environ.get("PORT", 8080))
-    
-    # Railway 환경에서는 gunicorn 사용 권장
-    if os.environ.get('RAILWAY_ENVIRONMENT'):
-        # Railway에서는 gunicorn이 자동으로 처리
-        app.run(host="0.0.0.0", port=port, debug=False)
-    else:
-        # 로컬 개발 환경
-        app.run(host="0.0.0.0", port=port, debug=True)
-
-# ===================================================================
-# 추가 유틸리티 함수들
-# ===================================================================
-
-def batch_update_translations(updates_list):
-    """
-    번역 일괄 업데이트 유틸리티
-    
-    Args:
-        updates_list: [
-            {
-                'group_id': 'abc123',
-                'lang_code': 'en', 
-                'updates': {'title': 'New Title', 'main_category': 'New Category'}
-            },
-            ...
-        ]
-    """
-    try:
-        batch = db.batch()
-        
-        for update_item in updates_list:
-            group_id = update_item['group_id']
-            lang_code = update_item['lang_code']
-            updates = update_item['updates']
-            
-            translation_ref = db.collection('uploads').document(group_id) \
-                               .collection('translations').document(lang_code)
-            
-            updates['updated_at'] = datetime.utcnow().isoformat()
-            batch.update(translation_ref, updates)
-        
-        batch.commit()
-        app.logger.info(f"✅ 일괄 번역 업데이트 완료: {len(updates_list)}개")
-        return True
-        
-    except Exception as e:
-        app.logger.error(f"일괄 번역 업데이트 실패: {e}")
-        return False
-
-def verify_translation_integrity():
-    """
-    번역 데이터 무결성 검증
-    - 모든 비디오에 필요한 언어 번역이 있는지 확인
-    - 누락된 번역 자동 생성
-    """
-    try:
-        uploads = db.collection('uploads').stream()
-        missing_translations = []
-        
-        for doc in uploads:
-            root_data = doc.to_dict()
-            group_id = doc.id
-            
-            # 각 언어별 번역 문서 확인
-            for lang_code in SUPPORTED_LANGUAGES.keys():
-                translation_doc = doc.reference.collection('translations').document(lang_code).get()
-                
-                if not translation_doc.exists:
-                    missing_translations.append({
-                        'group_id': group_id,
-                        'lang_code': lang_code,
-                        'korean_title': root_data.get('group_name', ''),
-                        'korean_main_cat': root_data.get('main_category', ''),
-                        'korean_sub_cat': root_data.get('sub_category', ''),
-                        'korean_leaf_cat': root_data.get('sub_sub_category', '')
-                    })
-        
-        app.logger.info(f"번역 무결성 검증 완료: {len(missing_translations)}개 누락 발견")
-        return missing_translations
-        
-    except Exception as e:
-        app.logger.error(f"번역 무결성 검증 실패: {e}")
-        return None
 
 # ===================================================================
 # 개발/테스트용 엔드포인트 (운영에서는 제거 권장)
@@ -2350,3 +2252,24 @@ def test_translation():
         })
     except Exception as e:
         return jsonify({'error': f'번역 실패: {e}'}), 500
+
+# ===================================================================
+# 앱 시작 시 스케줄러 자동 실행
+# ===================================================================
+
+if __name__ == "__main__":
+    # Railway 환경 초기화
+    initialize_railway_environment()
+    
+    # 스케줄러 시작
+    start_background_scheduler()
+    
+    port = int(os.environ.get("PORT", 8080))
+    
+    # Railway 환경에서는 gunicorn 사용 권장
+    if os.environ.get('RAILWAY_ENVIRONMENT'):
+        # Railway에서는 gunicorn이 자동으로 처리
+        app.run(host="0.0.0.0", port=port, debug=False)
+    else:
+        # 로컬 개발 환경
+        app.run(host="0.0.0.0", port=port, debug=True)
