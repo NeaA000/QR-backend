@@ -37,3 +37,4 @@ gunicorn
 
 pandas
 APScheduler==3.10.4
+googletrans==4.0.0rc1

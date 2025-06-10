@@ -35,6 +35,10 @@ import threading
 # ── 변경된 부분: video 파일 길이를 가져오기 위한 import (MoviePy 최신 경로) ──
 from moviepy.video.io.VideoFileClip import VideoFileClip
 
+# ── 번역 관련 import 추가 ──
+from googletrans import Translator
+import time
+
 # ==== 환경변수 설정 ====
 ADMIN_EMAIL       = os.environ.get('ADMIN_EMAIL', '')
 ADMIN_PASSWORD    = os.environ.get('ADMIN_PASSWORD', 'changeme')
@@ -48,6 +52,21 @@ REGION_NAME       = os.environ['REGION_NAME']
 BUCKET_NAME       = os.environ['BUCKET_NAME']
 APP_BASE_URL      = os.environ.get('APP_BASE_URL', 'http://localhost:5000/watch/')
 SECRET_KEY        = os.environ.get('FLASK_SECRET_KEY', 'supersecret')
+
+# ==== 번역 관련 설정 ====
+# 전역 번역기 인스턴스
+translator = Translator()
+
+# 지원 언어 코드 매핑
+SUPPORTED_LANGUAGES = {
+    'ko': 'ko',  # 한국어
+    'zh': 'zh',  # 중국어 (간체)
+    'vi': 'vi',  # 베트남어
+    'th': 'th',  # 태국어
+    'en': 'en',  # 영어
+    'uz': 'uz',  # 우즈베크어
+    'ja': 'ja'   # 일본어
+}
 
 # ==== Firebase Admin + Firestore + Storage 초기화 ====
 if not firebase_admin._apps:
@@ -93,7 +112,66 @@ config = TransferConfig(
     use_threads         = True
 )
 
-# ==== 유틸리티 함수들 ====
+# ==== 번역 유틸리티 함수들 ====
+
+def translate_text(text, target_language):
+    """
+    Google Translate API를 사용해서 텍스트 번역
+    
+    Args:
+        text: 번역할 텍스트 (한국어)
+        target_language: 대상 언어 코드
+    
+    Returns:
+        번역된 텍스트 또는 원본 텍스트 (실패 시)
+    """
+    try:
+        if target_language == 'ko' or not text.strip():
+            return text  # 한국어는 원본 그대로, 빈 텍스트도 그대로
+        
+        # 번역 요청 (한국어 → 대상 언어)
+        result = translator.translate(text, src='ko', dest=target_language)
+        translated_text = result.text
+        
+        app.logger.info(f"번역 완료: '{text}' → '{translated_text}' ({target_language})")
+        return translated_text
+        
+    except Exception as e:
+        app.logger.warning(f"번역 실패 ({target_language}): {e}, 원본 텍스트 사용")
+        return text
+
+def create_multilingual_metadata(korean_text):
+    """
+    한국어 텍스트를 모든 지원 언어로 번역
+    
+    Args:
+        korean_text: 번역할 한국어 텍스트
+    
+    Returns:
+        Dict: 언어별 번역 결과
+    """
+    translations = {}
+    
+    if not korean_text.strip():
+        # 빈 텍스트면 모든 언어에 빈 문자열 반환
+        return {lang: '' for lang in SUPPORTED_LANGUAGES.keys()}
+    
+    for lang_code in SUPPORTED_LANGUAGES.keys():
+        try:
+            translated = translate_text(korean_text, lang_code)
+            translations[lang_code] = translated
+            
+            # API 제한 방지를 위한 짧은 대기
+            if lang_code != 'ko':
+                time.sleep(0.2)
+                
+        except Exception as e:
+            app.logger.error(f"언어 {lang_code} 번역 중 오류: {e}")
+            translations[lang_code] = korean_text
+    
+    return translations
+
+# ==== 기존 유틸리티 함수들 ====
 
 def generate_presigned_url(key, expires_in=86400):
     """
@@ -320,7 +398,7 @@ def admin_required(f):
     return decorated
 
 # ===================================================================
-# 새로 추가된 백그라운드 자동 갱신 시스템
+# 백그라운드 자동 갱신 시스템
 # ===================================================================
 
 def refresh_expiring_urls():
@@ -355,12 +433,23 @@ def refresh_expiring_urls():
                     # 새 presigned URL 생성 (7일 유효)
                     new_presigned_url = generate_presigned_url(video_key, expires_in=604800)
                     
+                    # QR URL도 갱신
+                    qr_key = data.get('qr_key', '')
+                    if qr_key:
+                        new_qr_url = generate_presigned_url(qr_key, expires_in=604800)
+                        update_data['qr_presigned_url'] = new_qr_url
+                    
                     # Firestore 업데이트
-                    doc.reference.update({
+                    update_data = {
                         'presigned_url': new_presigned_url,
                         'auto_updated_at': datetime.utcnow().isoformat(),
                         'auto_update_reason': 'background_refresh'
-                    })
+                    }
+                    
+                    if qr_key:
+                        update_data['qr_presigned_url'] = generate_presigned_url(qr_key, expires_in=604800)
+                    
+                    doc.reference.update(update_data)
                     
                     updated_count += 1
                     app.logger.info(f"✅ 문서 {doc.id} URL 갱신 완료")
@@ -375,7 +464,7 @@ def refresh_expiring_urls():
 
 def refresh_qr_presigned_urls():
     """
-    QR 이미지의 presigned URL도 갱신 (선택사항)
+    QR 이미지의 presigned URL도 갱신 (단일 QR 이미지)
     """
     try:
         app.logger.info("🔄 QR 이미지 URL 갱신 작업 시작...")
@@ -510,35 +599,43 @@ def get_scheduler_status():
         return jsonify({'error': '스케줄러 상태를 가져올 수 없습니다.'}), 500
 
 # ===================================================================
-# 업로드 핸들러: 동영상 길이를 자동으로 계산하여 lecture_time에 저장
+# 업로드 핸들러: 자동 번역 기능 포함
 # ===================================================================
 @app.route('/upload', methods=['POST'])
 def upload_video():
     """
-    동영상 업로드 처리:
+    동영상 업로드 처리 (다국어 번역 기능 추가):
     1) 클라이언트에서 파일과 기타 메타데이터 수신
-    2) 파일을 임시로 저장 → S3 업로드
-    3) moviepy 로 동영상 길이(초 단위) 계산 → "분:초" 문자열로 변환
-    4) Firestore에 group_id, lecture_time 등을 자동 저장
+    2) 한국어 강의명을 7개 언어로 자동 번역
+    3) 파일을 임시로 저장 → S3 업로드
+    4) moviepy로 동영상 길이(초 단위) 계산 → "분:초" 문자열로 변환
+    5) Firestore에 다국어 메타데이터 저장
     """
     # 세션 인증(기존 로직)
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
 
     file          = request.files.get('file')
-    group_name    = request.form.get('group_name', 'default')
+    group_name    = request.form.get('group_name', 'default')  # 한국어 강의명
     main_cat      = request.form.get('main_category', '')
     sub_cat       = request.form.get('sub_category', '')
     leaf_cat      = request.form.get('sub_sub_category', '')
-
-    # lecture_time 은 더 이상 폼으로 받지 않고, 자동 계산
     lecture_level = request.form.get('level', '')
     lecture_tag   = request.form.get('tag', '')
 
     if not file:
         return "파일이 필요합니다.", 400
 
-    # 1) 그룹 ID 생성 및 S3 키 구성
+    # 🌍 1) 한국어 강의명을 7개 언어로 번역
+    app.logger.info(f"다국어 번역 시작: '{group_name}'")
+    translated_titles = create_multilingual_metadata(group_name)
+    
+    # 카테고리들도 번역 (선택사항)
+    translated_main_cat = create_multilingual_metadata(main_cat) if main_cat else {}
+    translated_sub_cat = create_multilingual_metadata(sub_cat) if sub_cat else {}
+    translated_leaf_cat = create_multilingual_metadata(leaf_cat) if leaf_cat else {}
+
+    # 2) 그룹 ID 생성 및 S3 키 구성
     group_id = uuid.uuid4().hex
     date_str = datetime.now().strftime('%Y%m%d')
     safe_name = re.sub(r'[^\w]', '_', group_name)
@@ -546,84 +643,98 @@ def upload_video():
     ext = Path(file.filename).suffix or '.mp4'
     video_key = f"{folder}/video{ext}"
 
-    # 2) 임시 저장 및 S3 업로드
+    # 3) 임시 저장 및 S3 업로드
     tmp_path = Path(tempfile.gettempdir()) / f"{group_id}{ext}"
     file.save(tmp_path)
 
-    # 3) moviepy 를 사용해 동영상 길이 계산
+    # 4) moviepy를 사용해 동영상 길이 계산
     try:
         with VideoFileClip(str(tmp_path)) as clip:
-            duration_sec = int(clip.duration)  # 초 단위
-        # with 블록을 벗어나면 clip.close()가 자동 호출됩니다.
+            duration_sec = int(clip.duration)
     except Exception as e:
         duration_sec = 0
-        app.logger.warning(f"moviepy 로 동영상 길이 가져오기 실패: {e}")
+        app.logger.warning(f"moviepy로 동영상 길이 가져오기 실패: {e}")
 
-    # "분:초" 형식으로 변환 (예: 125초 → "2:05")
+    # "분:초" 형식으로 변환
     minutes = duration_sec // 60
     seconds = duration_sec % 60
-    lecture_time = f"{minutes}:{seconds:02d}"  # 예: "2:05"
+    lecture_time = f"{minutes}:{seconds:02d}"
     app.logger.info(f"계산된 동영상 길이: {lecture_time} (총 {duration_sec}초)")
 
     # S3 업로드
     s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
     tmp_path.unlink(missing_ok=True)
 
-    # 4) Presigned URL 생성 (7일 유효)
+    # 5) Presigned URL 생성
     presigned_url = generate_presigned_url(video_key, expires_in=604800)
 
-    # 5) QR 링크 생성 및 S3 업로드 (강의명 포함)
-    qr_link = f"{APP_BASE_URL}{group_id}"
+    # 6) 단일 QR 코드 생성 (한국어 기본)
+    qr_link = f"{APP_BASE_URL}{group_id}"  # 언어 파라미터 없이
     qr_filename = f"{uuid.uuid4().hex}.png"
-    local_qr    = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
+    local_qr = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
     
-    # 강의명을 QR 코드에 포함
-    display_title = f"{group_name}"  # 그룹명을 강의명으로 사용
+    # 한국어 강의명으로 QR 코드 생성
+    display_title = group_name
     if main_cat or sub_cat or leaf_cat:
-        # 카테고리 정보가 있으면 함께 표시
         categories = [cat for cat in [main_cat, sub_cat, leaf_cat] if cat]
-        display_title = f"{group_name}\n({' > '.join(categories)})"
+        if categories:
+            display_title = f"{group_name}\n({' > '.join(categories)})"
     
     create_qr_with_logo(qr_link, local_qr, lecture_title=display_title)
+    
     qr_key = f"{folder}/{qr_filename}"
     s3.upload_file(local_qr, BUCKET_NAME, qr_key)
+    
+    # QR 이미지 URL 생성
+    qr_presigned_url = generate_presigned_url(qr_key, expires_in=604800)
+    
+    # 로컬 파일 삭제
+    try:
+        os.remove(local_qr)
+    except OSError:
+        pass
 
-    # 6) Firestore 메타데이터 저장 (lecture_time 필드에 자동 계산값 사용)
-    db.collection('uploads').document(group_id).set({
-        'group_id':         group_id,
-        'group_name':       group_name,
-        'main_category':    main_cat,
-        'sub_category':     sub_cat,
-        'sub_sub_category': leaf_cat,
-        'time':             lecture_time,       # ← 자동 계산된 값
-        'level':            lecture_level,
-        'tag':              lecture_tag,
-        'video_key':        video_key,
-        'presigned_url':    presigned_url,
-        'qr_link':          qr_link,
-        'qr_key':           qr_key,
-        'upload_date':      date_str,
-        'auto_updated_at':  datetime.utcnow().isoformat(),  # 자동 갱신 추적용
-        'auto_update_reason': 'initial_upload'
-    })
+    # 7) Firestore에 다국어 메타데이터 저장 (단일 QR)
+    firestore_data = {
+        'group_id': group_id,
+        'group_name': group_name,  # 원본 한국어 이름 유지 (호환성)
+        'translations': {
+            'title': translated_titles,
+            'main_category': translated_main_cat,
+            'sub_category': translated_sub_cat,
+            'sub_sub_category': translated_leaf_cat
+        },
+        'time': lecture_time,
+        'level': lecture_level,
+        'tag': lecture_tag,
+        'video_key': video_key,
+        'presigned_url': presigned_url,
+        'qr_link': qr_link,  # 단일 QR 링크
+        'qr_key': qr_key,    # 단일 QR 키
+        'qr_presigned_url': qr_presigned_url,  # 단일 QR URL
+        'upload_date': date_str,
+        'auto_updated_at': datetime.utcnow().isoformat(),
+        'auto_update_reason': 'initial_upload_with_translation'
+    }
+
+    db.collection('uploads').document(group_id).set(firestore_data)
+
+    app.logger.info(f"✅ 다국어 업로드 완료: {group_id}")
+    app.logger.info(f"번역된 언어: {list(translated_titles.keys())}")
 
     return render_template(
         'success.html',
-        group_id      = group_id,
-        main          = main_cat,
-        sub           = sub_cat,
-        leaf          = leaf_cat,
-        time          = lecture_time,    # 뷰에도 자동으로 보여줄 수 있습니다
-        level         = lecture_level,
-        tag           = lecture_tag,
-        presigned_url = presigned_url,
-        qr_link       = qr_link,
-        qr_url        = url_for('static', filename=qr_filename)
+        group_id=group_id,
+        translations=translated_titles,
+        time=lecture_time,
+        level=lecture_level,
+        tag=lecture_tag,
+        presigned_url=presigned_url,
+        qr_url=qr_presigned_url  # 단일 QR URL
     )
 
 # ===================================================================
-# 새로 추가된 부분: 수료증 정보 생성 시 Firestore에 readyForExcel & excelUpdated 플래그 추가
-# (Flutter나 다른 클라이언트가 수료증을 발급할 때 이 엔드포인트 호출)
+# 수료증 정보 생성 시 Firestore에 readyForExcel & excelUpdated 플래그 추가
 # ===================================================================
 @app.route('/create_certificate', methods=['POST'])
 def create_certificate():
@@ -832,26 +943,45 @@ def upload_form():
 @app.route('/watch/<group_id>', methods=['GET'])
 def watch(group_id):
     """
-    동영상 시청 페이지 (Presigned URL 갱신 포함, 기존 세션 기반)
+    동영상 시청 페이지 (다국어 지원)
+    Flutter 앱에서 언어를 동적으로 변경 가능
     """
     doc_ref = db.collection('uploads').document(group_id)
-    doc     = doc_ref.get()
+    doc = doc_ref.get()
     if not doc.exists:
         abort(404)
+    
     data = doc.to_dict()
 
+    # Presigned URL 갱신 로직 (기존과 동일)
     current_presigned = data.get('presigned_url', '')
     if not current_presigned or is_presigned_url_expired(current_presigned, 60):
         new_presigned_url = generate_presigned_url(data['video_key'], expires_in=604800)
         doc_ref.update({
-            'presigned_url':     new_presigned_url,
+            'presigned_url': new_presigned_url,
             'branch_updated_at': datetime.utcnow().isoformat()
         })
         video_url = new_presigned_url
     else:
         video_url = current_presigned
 
-    return render_template('watch.html', video_url=video_url)
+    # QR URL도 갱신 확인
+    current_qr_url = data.get('qr_presigned_url', '')
+    qr_key = data.get('qr_key', '')
+    if qr_key and (not current_qr_url or is_presigned_url_expired(current_qr_url, 60)):
+        new_qr_url = generate_presigned_url(qr_key, expires_in=604800)
+        doc_ref.update({
+            'qr_presigned_url': new_qr_url,
+            'qr_updated_at': datetime.utcnow().isoformat()
+        })
+    
+    # 다국어 메타데이터 포함해서 반환 (Flutter에서 동적 선택용)
+    return render_template(
+        'watch.html', 
+        video_url=video_url,
+        group_data=data,  # 전체 데이터 전달
+        available_languages=SUPPORTED_LANGUAGES
+    )
 
 @app.route('/generate_weekly_zip', methods=['GET'])
 @admin_required
