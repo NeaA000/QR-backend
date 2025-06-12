@@ -1,6 +1,12 @@
 # backend/database.py
+
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 from firebase_admin import firestore
 from datetime import datetime
+
 
 db = firestore.client()
 

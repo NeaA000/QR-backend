@@ -1,4 +1,7 @@
 # backend/video_handler.py
+
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import os
 import uuid
 import re

@@ -1,4 +1,9 @@
 # backend/storage.py
+
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 import boto3
 from boto3.s3.transfer import TransferConfig
 import firebase_admin

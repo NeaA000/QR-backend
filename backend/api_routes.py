@@ -1,4 +1,10 @@
 # backend/api_routes.py
+
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+
 from flask import Blueprint, request, jsonify, abort
 from auth import admin_required
 from database import db

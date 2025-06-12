@@ -1,4 +1,9 @@
 # backend/app.py (메인 애플리케이션)
+
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 from flask import Flask
 from config import SECRET_KEY, UPLOAD_FOLDER, MAX_CONTENT_LENGTH
 from qr_generator import download_korean_font
