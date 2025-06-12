@@ -1,3 +1,8 @@
+# 빌드 도구 (맨 위에 추가)
+setuptools==68.2.2
+wheel==0.41.3
+pip==23.3.1
+
 # Flask 웹 프레임워크
 Flask==2.3.3
 Werkzeug==2.3.7
@@ -18,9 +23,10 @@ qrcode[pil]==7.4.2
 # 이미지 처리
 Pillow==10.0.1
 
-# 비디오 처리
-moviepy==1.0.3
+# 비디오 처리 (moviepy 의존성 문제 해결)
+imageio==2.31.5
 imageio-ffmpeg==0.4.9
+moviepy==1.0.3
 
 # 엑셀 처리
 pandas==2.1.1
@@ -67,3 +73,8 @@ protobuf==4.24.4
 proto-plus==1.22.3
 msgpack==1.0.7
 CacheControl==0.13.1
+
+# moviepy 의존성
+decorator==5.1.1
+proglog==0.1.10
+tqdm==4.66.1
