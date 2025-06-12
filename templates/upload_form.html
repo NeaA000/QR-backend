@@ -1,47 +1,222 @@
+<!-- ===================================================================
+# templates/upload_form.html
+=================================================================== -->
 <!doctype html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8" />
-  <title>강의 업로드 폼</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>강의 업로드</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      padding: 20px;
+      max-width: 800px;
+      margin: 0 auto;
+      background-color: #f5f5f5;
+    }
+    .upload-container {
+      background: white;
+      padding: 40px;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+    }
+    h2 {
+      color: #333;
+      margin-bottom: 30px;
+      text-align: center;
+    }
+    .form-group {
+      margin-bottom: 25px;
+    }
+    label {
+      display: block;
+      margin-bottom: 8px;
+      color: #555;
+      font-weight: 600;
+    }
+    input[type="text"],
+    input[type="file"],
+    select {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid #ddd;
+      border-radius: 5px;
+      font-size: 16px;
+      box-sizing: border-box;
+      background-color: white;
+    }
+    input[type="file"] {
+      padding: 10px;
+    }
+    select {
+      cursor: pointer;
+    }
+    input:focus,
+    select:focus {
+      outline: none;
+      border-color: #2a9d8f;
+    }
+    .file-input-group {
+      margin-bottom: 25px;
+    }
+    .file-label {
+      display: block;
+      margin-bottom: 8px;
+      color: #555;
+      font-weight: 600;
+    }
+    .file-input-wrapper {
+      position: relative;
+      overflow: hidden;
+      display: inline-block;
+      cursor: pointer;
+      width: 100%;
+    }
+    .file-input-button {
+      display: block;
+      padding: 12px;
+      background-color: #f8f9fa;
+      border: 2px dashed #ddd;
+      border-radius: 5px;
+      text-align: center;
+      color: #666;
+      transition: all 0.3s;
+    }
+    .file-input-wrapper:hover .file-input-button {
+      background-color: #e9ecef;
+      border-color: #2a9d8f;
+      color: #2a9d8f;
+    }
+    .file-input-wrapper input[type="file"] {
+      position: absolute;
+      left: -9999px;
+    }
+    .selected-file {
+      margin-top: 10px;
+      color: #2a9d8f;
+      font-size: 14px;
+    }
+    button[type="submit"] {
+      width: 100%;
+      padding: 15px;
+      background-color: #2a9d8f;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      font-size: 18px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 0.3s;
+      margin-top: 30px;
+    }
+    button[type="submit"]:hover {
+      background-color: #238b7f;
+    }
+    button[type="submit"]:disabled {
+      background-color: #ccc;
+      cursor: not-allowed;
+    }
+    .required {
+      color: #e74c3c;
+    }
+    .help-text {
+      font-size: 14px;
+      color: #666;
+      margin-top: 5px;
+    }
+    .progress-bar {
+      display: none;
+      width: 100%;
+      height: 20px;
+      background-color: #f0f0f0;
+      border-radius: 10px;
+      margin-top: 20px;
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      background-color: #2a9d8f;
+      width: 0%;
+      transition: width 0.3s;
+    }
+  </style>
 </head>
 <body>
-  <h2>강의 업로드 폼</h2>
-  <form method="post" action="/upload" enctype="multipart/form-data">
-    그룹 이름: <input name="group_name" required /><br/>
+  <div class="upload-container">
+    <h2>📹 강의 업로드</h2>
+    <form method="post" action="/upload" enctype="multipart/form-data" id="uploadForm">
+      <div class="form-group">
+        <label for="group_name">강의명 <span class="required">*</span></label>
+        <input type="text" id="group_name" name="group_name" required placeholder="예: 기초 용접 안전교육" />
+        <div class="help-text">한국어로 입력하시면 자동으로 7개 언어로 번역됩니다</div>
+      </div>
 
-    <!-- 대분류 -->
-    대분류:
-    <select name="main_category" id="main_cat" required>
-      <option value="">선택</option>
-      {% for m in mains %}
-        <option value="{{ m }}">{{ m }}</option>
-      {% endfor %}
-    </select><br/>
+      <div class="form-group">
+        <label for="main_category">대분류 <span class="required">*</span></label>
+        <select name="main_category" id="main_cat" required>
+          <option value="">선택하세요</option>
+          {% for m in mains %}
+            <option value="{{ m }}">{{ m }}</option>
+          {% endfor %}
+        </select>
+      </div>
 
-    <!-- 중분류 -->
-    중분류:
-    <select name="sub_category" id="sub_cat" required>
-      <option value="">먼저 대분류 선택</option>
-    </select><br/>
+      <div class="form-group">
+        <label for="sub_category">중분류 <span class="required">*</span></label>
+        <select name="sub_category" id="sub_cat" required>
+          <option value="">먼저 대분류를 선택하세요</option>
+        </select>
+      </div>
 
-    <!-- 소분류 -->
-    소분류:
-    <select name="sub_sub_category" id="leaf_cat" required>
-      <option value="">먼저 중분류 선택</option>
-    </select><br/>
+      <div class="form-group">
+        <label for="sub_sub_category">소분류 <span class="required">*</span></label>
+        <select name="sub_sub_category" id="leaf_cat" required>
+          <option value="">먼저 중분류를 선택하세요</option>
+        </select>
+      </div>
 
-    <!-- 시간 입력 필드 제거 (자동 계산으로 대체) -->
-    <!--
-    시간: <input name="time" placeholder="예: 30분" required /><br/>
-    -->
+      <div class="form-group">
+        <label for="level">난이도 <span class="required">*</span></label>
+        <input type="text" id="level" name="level" required placeholder="예: 초급, 중급, 고급" />
+      </div>
 
-    레벨: <input name="level" placeholder="예: 초급" required /><br/>
-    태그: <input name="tag" placeholder="예: 자격증 포함" /><br/>
-    파일: <input type="file" name="file" accept="video/*" required /><br/>
-    <button type="submit">업로드</button>
-  </form>
+      <div class="form-group">
+        <label for="tag">태그</label>
+        <input type="text" id="tag" name="tag" placeholder="예: 자격증 포함, 실습 위주 (선택사항)" />
+      </div>
 
-  <!-- subs, leafs 데이터를 JSON으로 숨겨놓고 -->
+      <div class="file-input-group">
+        <label class="file-label">동영상 파일 <span class="required">*</span></label>
+        <div class="file-input-wrapper">
+          <label for="file" class="file-input-button">
+            📁 파일 선택 (MP4, AVI, MOV 등 모든 동영상 형식 지원)
+          </label>
+          <input type="file" id="file" name="file" accept="video/*" required />
+        </div>
+        <div class="selected-file" id="selectedVideo"></div>
+      </div>
+
+      <div class="file-input-group">
+        <label class="file-label">썸네일 이미지</label>
+        <div class="file-input-wrapper">
+          <label for="thumbnail" class="file-input-button">
+            🖼️ 썸네일 선택 (JPG, PNG 등 - 선택사항)
+          </label>
+          <input type="file" id="thumbnail" name="thumbnail" accept="image/*" />
+        </div>
+        <div class="selected-file" id="selectedThumbnail"></div>
+      </div>
+
+      <button type="submit" id="submitBtn">🚀 업로드 시작</button>
+
+      <div class="progress-bar" id="progressBar">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+    </form>
+  </div>
+
+  <!-- 카테고리 데이터 -->
   <script id="subs-data" type="application/json">
     {{ subs | tojson }}
   </script>
@@ -58,18 +233,58 @@
     const subSel  = document.getElementById('sub_cat');
     const leafSel = document.getElementById('leaf_cat');
 
+    // 대분류 변경 시
     mainSel.addEventListener('change', () => {
       const mids = subs[mainSel.value] || [];
-      subSel.innerHTML = '<option value="">선택</option>'
+      subSel.innerHTML = '<option value="">선택하세요</option>'
         + mids.map(m => `<option value="${m}">${m}</option>`).join('');
       // 소분류 초기화
-      leafSel.innerHTML = '<option value="">먼저 중분류 선택</option>';
+      leafSel.innerHTML = '<option value="">먼저 중분류를 선택하세요</option>';
     });
 
+    // 중분류 변경 시
     subSel.addEventListener('change', () => {
       const lst = leafs[subSel.value] || [];
-      leafSel.innerHTML = '<option value="">선택</option>'
+      leafSel.innerHTML = '<option value="">선택하세요</option>'
         + lst.map(l => `<option value="${l}">${l}</option>`).join('');
+    });
+
+    // 파일 선택 시 파일명 표시
+    document.getElementById('file').addEventListener('change', function(e) {
+      const fileName = e.target.files[0]?.name || '';
+      const fileSize = e.target.files[0]?.size || 0;
+      if (fileName) {
+        const sizeMB = (fileSize / (1024 * 1024)).toFixed(2);
+        document.getElementById('selectedVideo').textContent = `✅ 선택된 파일: ${fileName} (${sizeMB} MB)`;
+      }
+    });
+
+    document.getElementById('thumbnail').addEventListener('change', function(e) {
+      const fileName = e.target.files[0]?.name || '';
+      if (fileName) {
+        document.getElementById('selectedThumbnail').textContent = `✅ 선택된 썸네일: ${fileName}`;
+      }
+    });
+
+    // 폼 제출 시 진행률 표시
+    document.getElementById('uploadForm').addEventListener('submit', function(e) {
+      const submitBtn = document.getElementById('submitBtn');
+      const progressBar = document.getElementById('progressBar');
+      
+      submitBtn.disabled = true;
+      submitBtn.textContent = '⏳ 업로드 중...';
+      progressBar.style.display = 'block';
+      
+      // 가상의 진행률 애니메이션 (실제로는 서버에서 처리)
+      let progress = 0;
+      const interval = setInterval(() => {
+        progress += Math.random() * 15;
+        if (progress > 90) {
+          clearInterval(interval);
+          progress = 90;
+        }
+        document.getElementById('progressFill').style.width = progress + '%';
+      }, 500);
     });
   </script>
 </body>
