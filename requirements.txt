@@ -1,80 +1,44 @@
-# 빌드 도구 (맨 위에 추가)
-setuptools==68.2.2
-wheel==0.41.3
-pip==23.3.1
+# Flask 웹 서버 및 템플릿 엔진
+Flask>=2.0
+Jinja2>=2.9
 
-# Flask 웹 프레임워크
-Flask==2.3.3
-Werkzeug==2.3.7
+# AWS S3(Wasabi) 연동
+boto3
 
-# AWS S3 (Wasabi) 연동
-boto3==1.28.57
-botocore==1.31.57
+# Firebase Admin SDK (Firestore + Storage 접근용)
+firebase-admin
 
-# Firebase Admin SDK
-firebase-admin==6.2.0
+# QR 코드 생성 및 이미지 처리
+qrcode
+Pillow
 
-# Google 번역
-googletrans==4.0.0rc1
+# HTTP 요청
+requests
 
-# QR 코드 생성
-qrcode[pil]==7.4.2
+# 비디오 처리 (moviepy가 내부적으로 imageio-ffmpeg를 씀)
+moviepy>=2.2.1
+imageio-ffmpeg
 
-# 이미지 처리
-Pillow==10.0.1
+# 수치 연산 · 데이터 처리
+numpy
 
-# 비디오 처리 (moviepy 의존성 문제 해결)
-imageio==2.31.5
-imageio-ffmpeg==0.4.9
-moviepy==1.0.3
+# Pandas 및 OpenPyXL: 엑셀(.xlsx) 읽기/쓰기용
+pandas>=1.5
+openpyxl>=3.0
 
-# 엑셀 처리
-pandas==2.1.1
-openpyxl==3.1.2
+# 날짜/시간 파싱 (python-dateutil)
+python-dateutil
 
-# 인증
-PyJWT==2.8.0
-
-# 스케줄러
-APScheduler==3.10.4
+# 데코레이터 유틸리티 (일부 라이브러리 종속)
+decorator
 
 # WSGI 서버
-gunicorn==21.2.0
+gunicorn
 
-# 필수 의존성
-numpy==1.24.3
-python-dateutil==2.8.2
-certifi==2023.7.22
-charset-normalizer==3.3.0
-idna==3.4
-urllib3==1.26.17
-requests==2.31.0
+pandas
+APScheduler==3.10.4
+googletrans==4.0.0rc1
 
-# Firebase 의존성
-google-api-core==2.12.0
-google-api-python-client==2.103.0
-google-auth==2.23.3
-google-auth-httplib2==0.1.1
-google-cloud-core==2.3.3
-google-cloud-firestore==2.12.0
-google-cloud-storage==2.10.0
-googleapis-common-protos==1.61.0
-grpcio==1.59.0
-grpcio-status==1.59.0
 
-# 추가 유틸리티
-httplib2==0.22.0
-uritemplate==4.1.1
-cachetools==5.3.1
-pyasn1==0.5.0
-pyasn1-modules==0.3.0
-rsa==4.9
-protobuf==4.24.4
-proto-plus==1.22.3
-msgpack==1.0.7
-CacheControl==0.13.1
-
-# moviepy 의존성
-decorator==5.1.1
-proglog==0.1.10
-tqdm==4.66.1
+Pillow==10.0.1
+qrcode[pil]==7.4.2
