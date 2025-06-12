@@ -179,7 +179,7 @@ def generate_presigned_url(key, expires_in=86400):
 
 def download_korean_font():
     """
-    Railway 환경에서 안정적인 한국어 폰트 다운로드
+    Railway 환경에서 안정적인 한국어 폰트 다운로드 - 실제 작동하는 URL로 수정
     """
     font_dir = Path("fonts")
     font_dir.mkdir(exist_ok=True)
@@ -189,23 +189,34 @@ def download_korean_font():
     if font_path.exists():
         return str(font_path)
     
-    # 여러 폰트 URL 시도
+    # 실제 작동하는 한국어 폰트 URL들
     font_urls = [
-        # GitHub에서 직접 다운로드 (더 안정적)
-        "https://github.com/notofonts/noto-cjk/raw/main/Sans/SubsetOTF/TC/NotoSansCJKtc-Regular.otf",
-        "https://github.com/notofonts/noto-fonts/raw/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf",
-        # 백업 URL
-        "https://fonts.gstatic.com/s/notosans/v28/o-0IIpQlx3QUlC5A4PNb4j5Ba_2c7A.ttf"
+        # TTF 형식 (PIL에서 가장 안정적)
+        "https://cdn.jsdelivr.net/gh/fonts-archive/NotoSansKR/NotoSansKR-Regular.ttf",
+        # OTF 형식 백업
+        "https://fonts.gstatic.com/ea/notosanskr/v2/NotoSansKR-Regular.otf",
+        # 다른 백업 소스
+        "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/Korean/NotoSansCJKkr-Regular.otf"
     ]
     
     for i, font_url in enumerate(font_urls):
         try:
             app.logger.info(f"📥 한국어 폰트 다운로드 시도 {i+1}/{len(font_urls)}: {font_url}")
-            urllib.request.urlretrieve(font_url, font_path)
+            
+            # User-Agent 헤더 추가 (일부 서버에서 필요)
+            req = urllib.request.Request(font_url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+            
+            with urllib.request.urlopen(req, timeout=30) as response:
+                font_data = response.read()
+                
+            # 파일 쓰기
+            font_path.write_bytes(font_data)
             
             # 파일이 실제로 다운로드되었는지 확인
-            if font_path.exists() and font_path.stat().st_size > 1024:  # 최소 1KB
-                app.logger.info(f"✅ 폰트 다운로드 완료: {font_path}")
+            if font_path.exists() and font_path.stat().st_size > 10240:  # 최소 10KB
+                app.logger.info(f"✅ 폰트 다운로드 완료: {font_path} (크기: {font_path.stat().st_size:,} bytes)")
                 return str(font_path)
             else:
                 font_path.unlink(missing_ok=True)  # 실패한 파일 삭제
@@ -217,7 +228,7 @@ def download_korean_font():
     app.logger.error("❌ 모든 폰트 다운로드 시도 실패")
     return None
 
-def get_korean_font(size=24):
+def get_korean_font(size=36):  # 기본 크기를 24에서 36으로 증가
     """
     Railway 환경에서 안전한 한국어 폰트 로드
     """
@@ -344,15 +355,15 @@ def split_korean_text(text, font, max_width, draw):
 
 def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size_ratio=0.25, lecture_title=""):
     """
-    안전한 QR 코드 생성 - Railway 환경 최적화 (오류 방지)
+    개선된 QR 코드 생성 - 중앙 공백 확보, 한글 폰트 크기 증가, 위치 조정
     """
     from PIL import ImageDraw, ImageFont
     
     try:
-        # QR 코드 생성
+        # QR 코드 생성 (중앙 공백 확보를 위해 높은 오류 정정 수준 사용)
         qr = qrcode.QRCode(
             version=1,
-            error_correction=qrcode.constants.ERROR_CORRECT_H,
+            error_correction=qrcode.constants.ERROR_CORRECT_H,  # 최고 수준 (30% 복구 가능)
             box_size=12,
             border=4,
         )
@@ -361,26 +372,41 @@ def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size
         
         # QR 이미지 생성
         qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-        qr_size = 500
+        qr_size = 600  # 크기 증가
         qr_img = qr_img.resize((qr_size, qr_size), Image.LANCZOS)
         qr_w, qr_h = qr_img.size
 
-        # 로고 삽입 (선택사항)
+        # 로고 삽입 (중앙 공백 활용)
         if os.path.exists(logo_path):
             try:
                 logo = Image.open(logo_path)
-                logo_size = int(qr_w * size_ratio)
+                # 로고 크기를 QR 코드의 20%로 설정 (중앙 공백 활용)
+                logo_size = int(qr_w * 0.2)
                 logo = logo.resize((logo_size, logo_size), Image.LANCZOS)
-                pos = ((qr_w - logo_size) // 2, (qr_h - logo_size) // 2)
-                qr_img.paste(logo, pos, mask=(logo if logo.mode == 'RGBA' else None))
+                
+                # 흰색 배경 추가 (로고 주변)
+                logo_bg_size = int(logo_size * 1.2)
+                logo_bg = Image.new('RGB', (logo_bg_size, logo_bg_size), 'white')
+                logo_bg_pos = ((logo_bg_size - logo_size) // 2, (logo_bg_size - logo_size) // 2)
+                
+                if logo.mode == 'RGBA':
+                    logo_bg.paste(logo, logo_bg_pos, mask=logo.split()[3])
+                else:
+                    logo_bg.paste(logo, logo_bg_pos)
+                
+                # QR 코드 중앙에 로고 배치
+                pos = ((qr_w - logo_bg_size) // 2, (qr_h - logo_bg_size) // 2)
+                qr_img.paste(logo_bg, pos)
+                
             except Exception as e:
                 app.logger.warning(f"로고 삽입 실패: {e}")
 
-        # 강의명 텍스트 추가 (안전 모드)
+        # 강의명 텍스트 추가 (더 크고 가까운 위치)
         if lecture_title.strip():
             try:
-                text_height = int(qr_h * 0.25)  # 줄임 (30% → 25%)
-                margin = int(qr_h * 0.04)
+                # 텍스트 영역 크기 조정 (QR 코드에 더 가깝게)
+                text_height = 100  # 고정 높이
+                margin = 20  # QR 코드와의 간격 줄임
                 
                 total_height = qr_h + text_height + margin
                 final_img = Image.new('RGB', (qr_w, total_height), 'white')
@@ -388,29 +414,29 @@ def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size
                 
                 draw = ImageDraw.Draw(final_img)
                 
-                # 안전한 폰트 로드
-                base_font_size = max(20, int(text_height * 0.15))  # 줄임 (28px → 20px)
+                # 폰트 크기 증가
+                base_font_size = 36  # 더 큰 폰트 크기
                 font = get_korean_font(base_font_size)
                 
-                max_width = qr_w - 60
+                max_width = qr_w - 40  # 좌우 여백
                 
-                # 안전한 텍스트 분할
+                # 텍스트 분할
                 lines = split_korean_text(lecture_title, font, max_width, draw)
                 
-                # 줄 수 제한
-                if len(lines) > 3:
+                # 최대 2줄로 제한
+                if len(lines) > 2:
                     lines = lines[:2]
-                    if len(lines) > 1:
-                        lines[1] = lines[1][:20] + "..."  # 안전한 길이 제한
+                    if len(lines[1]) > 30:
+                        lines[1] = lines[1][:30] + "..."
                 
-                # 텍스트 배치
+                # 텍스트 높이 계산
                 try:
                     _, line_height = get_text_dimensions("한글Ag", font, draw)
                 except:
                     line_height = base_font_size
                 
-                total_text_height = len(lines) * line_height + (len(lines) - 1) * 8
-                text_y_start = qr_h + margin + (text_height - total_text_height) // 2
+                # 텍스트 시작 위치 (QR 코드 바로 아래)
+                text_y_start = qr_h + margin
                 
                 # 텍스트 그리기
                 for i, line in enumerate(lines):
@@ -420,40 +446,31 @@ def create_qr_with_logo(link_url, output_path, logo_path='static/logo.png', size
                     try:
                         text_width, _ = get_text_dimensions(line, font, draw)
                         text_x = (qr_w - text_width) // 2
-                        text_y = text_y_start + (i * (line_height + 8))
+                        text_y = text_y_start + (i * (line_height + 5))  # 줄 간격 줄임
                         
-                        # 외곽선 (선택사항)
-                        outline_offset = 1  # 줄임
-                        for dx in [-outline_offset, 0, outline_offset]:
-                            for dy in [-outline_offset, 0, outline_offset]:
-                                if dx != 0 or dy != 0:
-                                    try:
-                                        draw.text((text_x + dx, text_y + dy), line, font=font, fill='white')
-                                    except UnicodeEncodeError:
-                                        pass  # 외곽선 실패해도 무시
-                        
-                        # 메인 텍스트
-                        try:
-                            draw.text((text_x, text_y), line, font=font, fill='black')
-                        except UnicodeEncodeError:
-                            # 한국어 렌더링 실패 시 영어로 대체
-                            fallback_text = f"Lecture {i+1}"
-                            draw.text((text_x, text_y), fallback_text, font=font, fill='black')
+                        # 텍스트 그리기 (외곽선 없이 깔끔하게)
+                        draw.text((text_x, text_y), line, font=font, fill='black')
                             
                     except Exception as text_error:
                         app.logger.warning(f"텍스트 렌더링 실패 (줄 {i}): {text_error}")
+                        # 폴백: 영어로 대체
+                        try:
+                            fallback_text = f"Lecture {i+1}"
+                            draw.text((text_x, text_y), fallback_text, font=font, fill='black')
+                        except:
+                            pass
                 
                 # 고품질 저장
-                final_img.save(output_path, quality=90, optimize=True)
-                app.logger.info(f"✅ 안전한 QR 코드 생성 완료: {lecture_title}")
+                final_img.save(output_path, quality=95, optimize=True)
+                app.logger.info(f"✅ QR 코드 생성 완료 (개선된 버전): {lecture_title}")
                 
             except Exception as text_error:
                 app.logger.warning(f"텍스트 추가 실패, QR만 저장: {text_error}")
-                qr_img.save(output_path, quality=90, optimize=True)
+                qr_img.save(output_path, quality=95, optimize=True)
                 
         else:
             # 강의명이 없으면 QR 코드만 저장
-            qr_img.save(output_path, quality=90, optimize=True)
+            qr_img.save(output_path, quality=95, optimize=True)
             app.logger.info("✅ QR 코드 생성 완료 (강의명 없음)")
             
     except Exception as e:
@@ -725,6 +742,12 @@ def refresh_expiring_urls():
                         new_qr_url = generate_presigned_url(qr_key, expires_in=604800)
                         update_data['qr_presigned_url'] = new_qr_url
                     
+                    # 썸네일 URL도 갱신
+                    thumbnail_key = data.get('thumbnail_key', '')
+                    if thumbnail_key:
+                        new_thumbnail_url = generate_presigned_url(thumbnail_key, expires_in=604800)
+                        update_data['thumbnail_presigned_url'] = new_thumbnail_url
+                    
                     doc.reference.update(update_data)
                     
                     updated_count += 1
@@ -875,24 +898,26 @@ def get_scheduler_status():
         return jsonify({'error': '스케줄러 상태를 가져올 수 없습니다.'}), 500
 
 # ===================================================================
-# 개선된 업로드 핸들러: 서브컬렉션 번역 구조
+# 개선된 업로드 핸들러: 썸네일 추가 지원
 # ===================================================================
 @app.route('/upload', methods=['POST'])
 def upload_video():
     """
-    개선된 업로드 처리: 루트 문서와 번역 서브컬렉션 분리
+    개선된 업로드 처리: 루트 문서와 번역 서브컬렉션 분리 + 썸네일 지원
     1) 클라이언트에서 파일과 기타 메타데이터 수신
     2) 한국어 강의명을 7개 언어로 자동 번역
     3) 파일을 임시로 저장 → S3 업로드
     4) moviepy로 동영상 길이(초 단위) 계산 → "분:초" 문자열로 변환
-    5) 루트 문서에 핵심 메타데이터 저장
-    6) 번역 서브컬렉션에 언어별 번역 저장
+    5) 썸네일 이미지가 있으면 S3에 업로드
+    6) 루트 문서에 핵심 메타데이터 저장
+    7) 번역 서브컬렉션에 언어별 번역 저장
     """
     # 세션 인증(기존 로직)
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
 
     file          = request.files.get('file')
+    thumbnail     = request.files.get('thumbnail')  # 썸네일 파일 추가
     group_name    = request.form.get('group_name', 'default')  # 한국어 강의명
     main_cat      = request.form.get('main_category', '')
     sub_cat       = request.form.get('sub_category', '')
@@ -917,14 +942,16 @@ def upload_video():
     date_str = datetime.now().strftime('%Y%m%d')
     safe_name = re.sub(r'[^\w]', '_', group_name)
     folder = f"videos/{group_id}_{safe_name}_{date_str}"
-    ext = Path(file.filename).suffix or '.mp4'
+    
+    # 동영상 파일 확장자 (MP4가 아니어도 가능)
+    ext = Path(file.filename).suffix.lower() or '.mp4'
     video_key = f"{folder}/video{ext}"
 
     # 3) 임시 저장 및 S3 업로드
     tmp_path = Path(tempfile.gettempdir()) / f"{group_id}{ext}"
     file.save(tmp_path)
 
-    # 4) moviepy를 사용해 동영상 길이 계산
+    # 4) moviepy를 사용해 동영상 길이 계산 (모든 비디오 형식 지원)
     try:
         with VideoFileClip(str(tmp_path)) as clip:
             duration_sec = int(clip.duration)
@@ -944,6 +971,30 @@ def upload_video():
 
     # 5) Presigned URL 생성
     presigned_url = generate_presigned_url(video_key, expires_in=604800)
+
+    # 5-1) 썸네일 처리
+    thumbnail_key = None
+    thumbnail_presigned_url = None
+    if thumbnail and thumbnail.filename:
+        try:
+            # 썸네일 확장자
+            thumb_ext = Path(thumbnail.filename).suffix.lower() or '.jpg'
+            thumbnail_key = f"{folder}/thumbnail{thumb_ext}"
+            
+            # 썸네일 임시 저장
+            thumb_tmp_path = Path(tempfile.gettempdir()) / f"{group_id}_thumb{thumb_ext}"
+            thumbnail.save(thumb_tmp_path)
+            
+            # S3 업로드
+            s3.upload_file(str(thumb_tmp_path), BUCKET_NAME, thumbnail_key, Config=config)
+            thumb_tmp_path.unlink(missing_ok=True)
+            
+            # 썸네일 Presigned URL 생성
+            thumbnail_presigned_url = generate_presigned_url(thumbnail_key, expires_in=604800)
+            app.logger.info(f"✅ 썸네일 업로드 완료: {thumbnail_key}")
+            
+        except Exception as e:
+            app.logger.error(f"❌ 썸네일 업로드 실패: {e}")
 
     # 6) 단일 QR 코드 생성 (한국어 기본)
     qr_link = f"{APP_BASE_URL}{group_id}"  # 언어 파라미터 없이
@@ -990,6 +1041,11 @@ def upload_video():
         'created_at': datetime.utcnow().isoformat(),
         'updated_at': datetime.utcnow().isoformat()
     }
+
+    # 썸네일 정보 추가
+    if thumbnail_key:
+        root_doc_data['thumbnail_key'] = thumbnail_key
+        root_doc_data['thumbnail_presigned_url'] = thumbnail_presigned_url
 
     # 루트 문서 저장
     root_doc_ref = db.collection('uploads').document(group_id)
@@ -1039,7 +1095,8 @@ def upload_video():
         level=lecture_level,
         tag=lecture_tag,
         presigned_url=presigned_url,
-        qr_url=qr_presigned_url
+        qr_url=qr_presigned_url,
+        thumbnail_url=thumbnail_presigned_url
     )
 
 # ===================================================================
@@ -1232,11 +1289,13 @@ def upload_form():
     if not session.get('logged_in'):
         return redirect(url_for('login_page'))
 
-    main_cats = ['기계', '공구', '장비']
+    main_cats = ['기계', '공구', '장비', '약품', '화공약품']
     sub_map = {
         '기계': ['공작기계', '제조기계', '산업기계'],
         '공구': ['수공구', '전동공구', '절삭공구'],
-        '장비': ['안전장비', '운송장비', '작업장비']
+        '장비': ['안전장비', '운송장비', '작업장비'],
+        '약품': ['항생제', '인슐린', '항응고제'],
+        '화공약품': ['황산', '염산', '수산화나트륨']
     }
     leaf_map = {
         '공작기계': ['불도저', '크레인', '굴착기'],
@@ -1247,7 +1306,13 @@ def upload_form():
         '절삭공구': ['커터', '플라즈마 노즐', '드릴 비트'],
         '안전장비': ['헬멧', '방진 마스크', '낙하 방지벨트'],
         '운송장비': ['리프트 장비', '체인 블록', '호이스트'],
-        '작업장비': ['스캐폴딩', '작업대', '리프트 테이블']
+        '작업장비': ['스캐폴딩', '작업대', '리프트 테이블'],
+        '항생제': ['페니실린', '아목시실린', '세팔로스포린'],
+        '인슐린': ['속효성 인슐린', '중간형 인슐린', '지속형 인슐린'],
+        '항응고제': ['와파린', '헤파린', '리바록사반'],
+        '황산': ['진한 황산', '묽은 황산', '발연 황산'],
+        '염산': ['진한 염산', '묽은 염산', '공업용 염산'],
+        '수산화나트륨': ['고체 수산화나트륨', '수용액 수산화나트륨', '플레이크형 수산화나트륨']
     }
     return render_template('upload_form.html', mains=main_cats, subs=sub_map, leafs=leaf_map)
 
@@ -1284,6 +1349,16 @@ def watch(group_id):
             })
             video_data['presigned_url'] = new_presigned_url
         
+        # 썸네일 URL도 갱신 확인
+        current_thumbnail_url = video_data.get('thumbnail_presigned_url', '')
+        thumbnail_key = video_data.get('thumbnail_key', '')
+        if thumbnail_key and (not current_thumbnail_url or is_presigned_url_expired(current_thumbnail_url, 60)):
+            new_thumbnail_url = generate_presigned_url(thumbnail_key, expires_in=604800)
+            db.collection('uploads').document(group_id).update({
+                'thumbnail_presigned_url': new_thumbnail_url
+            })
+            video_data['thumbnail_presigned_url'] = new_thumbnail_url
+        
         return jsonify({
             'groupId': group_id,
             'title': video_data['display_title'],
@@ -1291,6 +1366,7 @@ def watch(group_id):
             'sub_category': video_data['display_sub_category'],
             'video_url': video_data['presigned_url'],
             'qr_url': video_data.get('qr_presigned_url', ''),
+            'thumbnail_url': video_data.get('thumbnail_presigned_url', ''),
             'language': requested_lang,
             'time': video_data.get('time', '0:00'),
             'level': video_data.get('level', ''),
@@ -1322,6 +1398,16 @@ def watch(group_id):
                 'qr_updated_at': datetime.utcnow().isoformat()
             })
             video_data['qr_presigned_url'] = new_qr_url
+        
+        # 썸네일 URL도 갱신 확인
+        current_thumbnail_url = video_data.get('thumbnail_presigned_url', '')
+        thumbnail_key = video_data.get('thumbnail_key', '')
+        if thumbnail_key and (not current_thumbnail_url or is_presigned_url_expired(current_thumbnail_url, 60)):
+            new_thumbnail_url = generate_presigned_url(thumbnail_key, expires_in=604800)
+            db.collection('uploads').document(group_id).update({
+                'thumbnail_presigned_url': new_thumbnail_url
+            })
+            video_data['thumbnail_presigned_url'] = new_thumbnail_url
         
         # 템플릿에 번역된 데이터 전달
         return render_template(
@@ -1403,6 +1489,15 @@ def search_videos_multilingual():
                 else:
                     video_url = current_presigned
                 
+                # 썸네일 URL 확인
+                thumbnail_url = root_data.get('thumbnail_presigned_url', '')
+                if root_data.get('thumbnail_key') and (not thumbnail_url or is_presigned_url_expired(thumbnail_url, 60)):
+                    new_thumbnail_url = generate_presigned_url(root_data['thumbnail_key'], expires_in=604800)
+                    doc.reference.update({
+                        'thumbnail_presigned_url': new_thumbnail_url
+                    })
+                    thumbnail_url = new_thumbnail_url
+                
                 matched_videos.append({
                     'groupId': group_id,
                     'title': display_title,
@@ -1415,6 +1510,7 @@ def search_videos_multilingual():
                     'upload_date': root_data.get('upload_date', ''),
                     'video_url': video_url,
                     'qr_url': root_data.get('qr_presigned_url', ''),
+                    'thumbnail_url': thumbnail_url,
                     'language': lang_code
                 })
         
@@ -1490,6 +1586,15 @@ def get_videos_by_category(category):
                 else:
                     video_url = current_presigned
                 
+                # 썸네일 URL 확인
+                thumbnail_url = root_data.get('thumbnail_presigned_url', '')
+                if root_data.get('thumbnail_key') and (not thumbnail_url or is_presigned_url_expired(thumbnail_url, 60)):
+                    new_thumbnail_url = generate_presigned_url(root_data['thumbnail_key'], expires_in=604800)
+                    doc.reference.update({
+                        'thumbnail_presigned_url': new_thumbnail_url
+                    })
+                    thumbnail_url = new_thumbnail_url
+                
                 # 번역된 데이터 사용
                 display_data = get_video_with_translation(group_id, lang_code)
                 if display_data:
@@ -1505,6 +1610,7 @@ def get_videos_by_category(category):
                         'upload_date': display_data.get('upload_date', ''),
                         'video_url': video_url,
                         'qr_url': display_data.get('qr_presigned_url', ''),
+                        'thumbnail_url': thumbnail_url,
                         'language': lang_code
                     })
         
@@ -1562,6 +1668,7 @@ def get_user_lectures():
                     'time': lecture_data.get('time', '0:00'),
                     'video_url': lecture_data.get('presigned_url', ''),
                     'qr_url': lecture_data.get('qr_presigned_url', ''),
+                    'thumbnail_url': lecture_data.get('thumbnail_presigned_url', ''),
                 })
         
         return jsonify({
@@ -1620,12 +1727,14 @@ def get_categories():
     
     # 각 언어별 카테고리 매핑 (Flutter 앱과 동일한 구조)
     categories_ko = {
-        'main_categories': ['전체', '기계', '공구', '장비'],
+        'main_categories': ['전체', '기계', '공구', '장비', '약품', '화공약품'],
         'sub_categories': {
-            '전체': ['건설기계', '공작기계', '산업기계', '제조기계', '수공구', '전동공구', '절삭공구', '측정공구', '안전장비', '운송장비'],
+            '전체': ['건설기계', '공작기계', '산업기계', '제조기계', '수공구', '전동공구', '절삭공구', '측정공구', '안전장비', '운송장비', '항생제', '인슐린', '항응고제', '황산', '염산', '수산화나트륨'],
             '기계': ['건설기계', '공작기계', '산업기계', '제조기계'],
             '공구': ['수공구', '전동공구', '절삭공구', '측정공구'],
-            '장비': ['안전장비', '운송장비']
+            '장비': ['안전장비', '운송장비'],
+            '약품': ['항생제', '인슐린', '항응고제'],
+            '화공약품': ['황산', '염산', '수산화나트륨']
         },
         'leaf_categories': {
             '건설기계': ['불도저', '크레인', '굴착기'],
@@ -1637,7 +1746,13 @@ def get_categories():
             '절삭공구': ['커터', '플라즈마 노즐', '드릴 비트'],
             '측정공구': ['캘리퍼스', '하이트 게이지', '마이크로미터'],
             '안전장비': ['헬멧', '방진 마스크', '낙하 방지벨트', '안전모', '안전화', '보호안경', '귀마개', '보호장갑', '호흡 보호구'],
-            '운송장비': ['리프팅 장비', '체인 블록', '호이스트']
+            '운송장비': ['리프팅 장비', '체인 블록', '호이스트'],
+            '항생제': ['페니실린', '아목시실린', '세팔로스포린'],
+            '인슐린': ['속효성 인슐린', '중간형 인슐린', '지속형 인슐린'],
+            '항응고제': ['와파린', '헤파린', '리바록사반'],
+            '황산': ['진한 황산', '묽은 황산', '발연 황산'],
+            '염산': ['진한 염산', '묽은 염산', '공업용 염산'],
+            '수산화나트륨': ['고체 수산화나트륨', '수용액 수산화나트륨', '플레이크형 수산화나트륨']
         }
     }
     
@@ -1695,7 +1810,8 @@ def get_videos_list():
                     'tag': video_data.get('tag', ''),
                     'upload_date': video_data['upload_date'],
                     'language': lang_code,
-                    'qr_url': video_data.get('qr_presigned_url', '')
+                    'qr_url': video_data.get('qr_presigned_url', ''),
+                    'thumbnail_url': video_data.get('thumbnail_presigned_url', '')
                 })
         
         return jsonify({
@@ -1735,6 +1851,16 @@ def get_video_detail(group_id):
         })
         video_data['presigned_url'] = new_presigned_url
     
+    # 썸네일 URL 갱신 확인
+    current_thumbnail_url = video_data.get('thumbnail_presigned_url', '')
+    thumbnail_key = video_data.get('thumbnail_key', '')
+    if thumbnail_key and (not current_thumbnail_url or is_presigned_url_expired(current_thumbnail_url, 60)):
+        new_thumbnail_url = generate_presigned_url(thumbnail_key, expires_in=604800)
+        db.collection('uploads').document(group_id).update({
+            'thumbnail_presigned_url': new_thumbnail_url
+        })
+        video_data['thumbnail_presigned_url'] = new_thumbnail_url
+    
     return jsonify({
         'group_id': video_data['group_id'],
         'title': video_data['display_title'],
@@ -1746,6 +1872,7 @@ def get_video_detail(group_id):
         'tag': video_data.get('tag', ''),
         'video_url': video_data['presigned_url'],
         'qr_url': video_data.get('qr_presigned_url', ''),
+        'thumbnail_url': video_data.get('thumbnail_presigned_url', ''),
         'qr_link': video_data.get('qr_link', ''),
         'language': lang_code,
         'language_name': SUPPORTED_LANGUAGES[lang_code],
@@ -2252,6 +2379,148 @@ def test_translation():
         })
     except Exception as e:
         return jsonify({'error': f'번역 실패: {e}'}), 500
+
+@app.route('/api/dev/test-qr', methods=['POST'])
+def test_qr_generation():
+    """
+    개발용: QR 코드 생성 테스트
+    Body: { "url": "https://example.com", "title": "테스트 강의" }
+    """
+    if not app.debug:
+        return jsonify({'error': '개발 모드에서만 사용 가능합니다.'}), 403
+    
+    data = request.get_json() or {}
+    url = data.get('url', 'https://example.com')
+    title = data.get('title', '테스트 강의')
+    
+    try:
+        # 임시 파일 생성
+        test_qr_path = f"/tmp/test_qr_{uuid.uuid4().hex}.png"
+        create_qr_with_logo(url, test_qr_path, lecture_title=title)
+        
+        # S3에 업로드
+        test_key = f"test/qr_{uuid.uuid4().hex}.png"
+        s3.upload_file(test_qr_path, BUCKET_NAME, test_key)
+        
+        # Presigned URL 생성
+        presigned_url = generate_presigned_url(test_key, expires_in=3600)
+        
+        # 임시 파일 삭제
+        os.remove(test_qr_path)
+        
+        return jsonify({
+            'message': 'QR 코드 생성 성공',
+            'qr_url': presigned_url,
+            'expires_in': '1시간'
+        })
+        
+    except Exception as e:
+        return jsonify({'error': f'QR 코드 생성 실패: {e}'}), 500
+
+# ===================================================================
+# 썸네일 관리 API
+# ===================================================================
+
+@app.route('/api/videos/<group_id>/thumbnail', methods=['POST'])
+@admin_required
+def update_thumbnail(group_id):
+    """
+    기존 비디오의 썸네일 업데이트
+    """
+    # 비디오 존재 확인
+    doc_ref = db.collection('uploads').document(group_id)
+    doc = doc_ref.get()
+    
+    if not doc.exists:
+        return jsonify({'error': '비디오를 찾을 수 없습니다.'}), 404
+    
+    thumbnail = request.files.get('thumbnail')
+    if not thumbnail:
+        return jsonify({'error': '썸네일 파일이 필요합니다.'}), 400
+    
+    try:
+        data = doc.to_dict()
+        
+        # 기존 썸네일 삭제 (있는 경우)
+        old_thumbnail_key = data.get('thumbnail_key')
+        if old_thumbnail_key:
+            try:
+                s3.delete_object(Bucket=BUCKET_NAME, Key=old_thumbnail_key)
+            except Exception as e:
+                app.logger.warning(f"기존 썸네일 삭제 실패: {e}")
+        
+        # 새 썸네일 업로드
+        thumb_ext = Path(thumbnail.filename).suffix.lower() or '.jpg'
+        date_str = data.get('upload_date', datetime.now().strftime('%Y%m%d'))
+        safe_name = re.sub(r'[^\w]', '_', data.get('group_name', 'default'))
+        folder = f"videos/{group_id}_{safe_name}_{date_str}"
+        thumbnail_key = f"{folder}/thumbnail_{uuid.uuid4().hex}{thumb_ext}"
+        
+        # 임시 저장
+        thumb_tmp_path = Path(tempfile.gettempdir()) / f"{group_id}_new_thumb{thumb_ext}"
+        thumbnail.save(thumb_tmp_path)
+        
+        # S3 업로드
+        s3.upload_file(str(thumb_tmp_path), BUCKET_NAME, thumbnail_key, Config=config)
+        thumb_tmp_path.unlink(missing_ok=True)
+        
+        # Presigned URL 생성
+        thumbnail_presigned_url = generate_presigned_url(thumbnail_key, expires_in=604800)
+        
+        # Firestore 업데이트
+        doc_ref.update({
+            'thumbnail_key': thumbnail_key,
+            'thumbnail_presigned_url': thumbnail_presigned_url,
+            'thumbnail_updated_at': datetime.utcnow().isoformat()
+        })
+        
+        return jsonify({
+            'message': '썸네일이 성공적으로 업데이트되었습니다.',
+            'thumbnail_url': thumbnail_presigned_url
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"썸네일 업데이트 실패: {e}")
+        return jsonify({'error': '썸네일 업데이트 중 오류가 발생했습니다.'}), 500
+
+@app.route('/api/videos/<group_id>/thumbnail', methods=['DELETE'])
+@admin_required
+def delete_thumbnail(group_id):
+    """
+    비디오의 썸네일 삭제
+    """
+    # 비디오 존재 확인
+    doc_ref = db.collection('uploads').document(group_id)
+    doc = doc_ref.get()
+    
+    if not doc.exists:
+        return jsonify({'error': '비디오를 찾을 수 없습니다.'}), 404
+    
+    try:
+        data = doc.to_dict()
+        thumbnail_key = data.get('thumbnail_key')
+        
+        if not thumbnail_key:
+            return jsonify({'error': '삭제할 썸네일이 없습니다.'}), 404
+        
+        # S3에서 삭제
+        try:
+            s3.delete_object(Bucket=BUCKET_NAME, Key=thumbnail_key)
+        except Exception as e:
+            app.logger.warning(f"S3 썸네일 삭제 실패: {e}")
+        
+        # Firestore 업데이트
+        doc_ref.update({
+            'thumbnail_key': firestore.DELETE_FIELD,
+            'thumbnail_presigned_url': firestore.DELETE_FIELD,
+            'thumbnail_deleted_at': datetime.utcnow().isoformat()
+        })
+        
+        return jsonify({'message': '썸네일이 성공적으로 삭제되었습니다.'}), 200
+        
+    except Exception as e:
+        app.logger.error(f"썸네일 삭제 실패: {e}")
+        return jsonify({'error': '썸네일 삭제 중 오류가 발생했습니다.'}), 500
 
 # ===================================================================
 # 앱 시작 시 스케줄러 자동 실행
