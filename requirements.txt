@@ -22,12 +22,6 @@ imageio-ffmpeg
 # 수치 연산 · 데이터 처리
 numpy
 
-# 수료증 생성 관련 추가
-reportlab==4.0.7
-pillow==10.1.0
-reportlab==4.0.7
-flask-cors==4.0.0
-
 # Pandas 및 OpenPyXL: 엑셀(.xlsx) 읽기/쓰기용
 pandas>=1.5
 openpyxl>=3.0
