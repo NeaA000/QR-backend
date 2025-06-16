@@ -1,4 +1,4 @@
-# worker/firestore_poller.py - 수정된 버전
+# worker/firestore_poller.py - 수정된 버전 (Wasabi vs Firebase Storage 구분)
 
 import os
 import time
@@ -11,7 +11,7 @@ import sys
 import logging
 from typing import List, Tuple, Dict, Any
 
-# Firebase Admin SDK 사용 (certificate_worker와 동일하게)
+# Firebase Admin SDK 사용
 import firebase_admin
 from firebase_admin import credentials, firestore, storage
 
@@ -35,8 +35,16 @@ POLL_INTERVAL_SECONDS = int(os.getenv('POLL_INTERVAL_SECONDS', '60'))
 BATCH_SIZE = int(os.getenv('BATCH_SIZE', '100'))
 MASTER_FILENAME = "master_certificates.xlsx"
 
+# Firebase Storage 버킷 이름 (수료증 엑셀 저장용)
+FIREBASE_STORAGE_BUCKET = os.getenv("GCLOUD_STORAGE_BUCKET")
+if not FIREBASE_STORAGE_BUCKET:
+    # fallback으로 .firebasestorage.app 형식 사용
+    FIREBASE_STORAGE_BUCKET = f"{os.environ['project_id']}.firebasestorage.app"
+
+logger.info(f"🔍 Firebase Storage 버킷: {FIREBASE_STORAGE_BUCKET}")
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Firebase 초기화 (certificate_worker와 동일한 방식)
+# Firebase 초기화
 # ─────────────────────────────────────────────────────────────────────────────
 def initialize_firebase():
     """Firebase Admin SDK 초기화"""
@@ -57,14 +65,26 @@ def initialize_firebase():
             }
             
             cred = credentials.Certificate(firebase_creds)
+            
+            # Firebase Storage 버킷 명시적 설정
             firebase_admin.initialize_app(cred, {
-                'storageBucket': f"{os.environ['project_id']}.appspot.com"
+                'storageBucket': FIREBASE_STORAGE_BUCKET
             })
+            
+            logger.info(f"✅ Firebase Admin 초기화 완료")
             
         db = firestore.client()
         bucket = storage.bucket()
         
-        logger.info(f"✅ Firebase 초기화 완료 - Project: {os.environ['project_id']}")
+        # 버킷 접근 테스트
+        try:
+            # 버킷이 존재하는지 간단히 테스트 (실제 파일 조회 시도)
+            blobs = list(bucket.list_blobs(max_results=1))
+            logger.info(f"✅ Firebase Storage 버킷 접근 성공: {bucket.name}")
+        except Exception as e:
+            logger.warning(f"⚠️ 버킷 접근 테스트 중 오류 (버킷이 비어있을 수 있음): {e}")
+        
+        logger.info(f"✅ Firebase 초기화 완료 - Project: {os.environ['project_id']}, Storage: {FIREBASE_STORAGE_BUCKET}")
         return db, bucket
         
     except Exception as e:
@@ -174,7 +194,7 @@ def get_user_info(user_uid: str) -> Dict[str, str]:
         return {'name': "", 'phone': "", 'email': ""}
 
 def get_or_create_master_excel():
-    """마스터 엑셀 파일 가져오기 또는 생성"""
+    """Firebase Storage에서 마스터 엑셀 파일 가져오기 또는 생성"""
     try:
         master_blob = bucket.blob(MASTER_FILENAME)
         
@@ -185,7 +205,7 @@ def get_or_create_master_excel():
             df = pd.read_excel(excel_buffer, engine="openpyxl")
             logger.debug(f"📥 기존 마스터 엑셀 로드 완료 (행 수: {len(df)})")
             
-            # 기존 DataFrame에서 불필요한 열 삭제 (certificate_worker와 동일하게)
+            # 기존 DataFrame에서 불필요한 열 삭제
             columns_to_remove = ['User UID', 'Lecture Title', 'Issued At']
             for col in columns_to_remove:
                 if col in df.columns:
@@ -219,7 +239,7 @@ def get_or_create_master_excel():
         raise
 
 def save_master_excel(df):
-    """마스터 엑셀 파일 저장"""
+    """Firebase Storage에 마스터 엑셀 파일 저장"""
     try:
         # DataFrame을 엑셀로 변환
         out_buffer = io.BytesIO()
@@ -420,6 +440,7 @@ def log_statistics():
 def run_poller():
     """메인 폴링 루프"""
     logger.info(f"🚀 Firestore Poller 시작 (간격: {POLL_INTERVAL_SECONDS}초, 배치 크기: {BATCH_SIZE})")
+    logger.info(f"📦 Firebase Storage 버킷: {FIREBASE_STORAGE_BUCKET}")
     
     # 시작 시 통계 로깅
     log_statistics()
