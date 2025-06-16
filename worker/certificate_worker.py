@@ -1,4 +1,4 @@
-# worker/certificate_worker.py - 수료증 처리 전용 워커 (수정됨)
+# worker/certificate_worker.py - 수료증 처리 전용 워커 (재시도 로직 포함)
 
 import os
 import io
@@ -54,7 +54,7 @@ def initialize_firebase():
             
             cred = credentials.Certificate(firebase_creds)
             firebase_admin.initialize_app(cred, {
-                'storageBucket': f"{os.environ['project_id']}.appspot.com"
+                'storageBucket': f"{os.environ['project_id']}.firebasestorage.app"
             })
             
         db = firestore.client()
@@ -176,16 +176,15 @@ def get_user_info(user_uid):
         return {'name': '', 'phone': '', 'email': ''}
 
 def get_or_create_master_excel():
-    """마스터 엑셀 파일 가져오기 또는 생성"""
+    """마스터 엑셀 파일 가져오기 또는 생성 - 폴백 옵션 포함"""
     try:
-        master_blob = bucket.blob(MASTER_FILENAME)
-        
-        # 기존 파일 다운로드 시도
+        # 1) Firebase Storage 시도
         try:
+            master_blob = bucket.blob(MASTER_FILENAME)
             existing_bytes = master_blob.download_as_bytes()
             excel_buffer = io.BytesIO(existing_bytes)
             df = pd.read_excel(excel_buffer, engine='openpyxl')
-            logger.info(f"📥 기존 마스터 엑셀 로드 완료 (행 수: {len(df)})")
+            logger.info(f"📥 Firebase Storage에서 기존 마스터 엑셀 로드 완료 (행 수: {len(df)})")
             
             # 기존 DataFrame에서 불필요한 열 제거 (혹시 있다면)
             columns_to_remove = ['User UID', 'Lecture Title', 'Issued At']
@@ -194,9 +193,23 @@ def get_or_create_master_excel():
                     df = df.drop(columns=[col])
                     logger.debug(f"🗑️ 컬럼 제거: {col}")
             
-        except Exception as e:
-            # 새 DataFrame 생성
-            logger.info(f"📄 새 마스터 엑셀 파일 생성 (기존 파일 없음: {e})")
+            return df
+            
+        except Exception as firebase_error:
+            logger.warning(f"⚠️ Firebase Storage 로드 실패: {firebase_error}")
+            
+            # 2) 로컬 임시 파일 확인
+            local_path = f'/tmp/{MASTER_FILENAME}'
+            if os.path.exists(local_path):
+                try:
+                    df = pd.read_excel(local_path, engine='openpyxl')
+                    logger.info(f"📥 로컬 임시 파일에서 마스터 엑셀 로드 완료 (행 수: {len(df)})")
+                    return df
+                except Exception as local_error:
+                    logger.warning(f"⚠️ 로컬 파일 로드 실패: {local_error}")
+            
+            # 3) 새 DataFrame 생성
+            logger.info("📄 새 마스터 엑셀 파일 생성")
             df = pd.DataFrame(columns=[
                 '업데이트 날짜',
                 '사용자 UID',
@@ -207,39 +220,63 @@ def get_or_create_master_excel():
                 '발급 일시',
                 'PDF URL'
             ])
+            return df
             
-        return df
-        
     except Exception as e:
         logger.error(f"❌ 마스터 엑셀 처리 실패: {e}")
         raise
 
 def save_master_excel(df):
-    """마스터 엑셀 파일 저장"""
-    try:
-        # DataFrame을 엑셀로 변환
-        out_buffer = io.BytesIO()
-        with pd.ExcelWriter(out_buffer, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Certificates')
-        out_buffer.seek(0)
-        
-        # Firebase Storage에 업로드
-        master_blob = bucket.blob(MASTER_FILENAME)
-        master_blob.upload_from_file(
-            out_buffer,
-            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-        
-        logger.info(f"✅ 마스터 엑셀 저장 완료 (총 {len(df)}행)")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ 마스터 엑셀 저장 실패: {e}")
-        return False
+    """마스터 엑셀 파일 저장 - 재시도 로직 포함"""
+    max_retries = 3
+    retry_delay = 5  # 초
+    
+    for attempt in range(max_retries):
+        try:
+            # DataFrame을 엑셀로 변환
+            out_buffer = io.BytesIO()
+            with pd.ExcelWriter(out_buffer, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Certificates')
+            out_buffer.seek(0)
+            
+            # Firebase Storage에 업로드
+            master_blob = bucket.blob(MASTER_FILENAME)
+            master_blob.upload_from_file(
+                out_buffer,
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            
+            logger.info(f"✅ Firebase Storage에 마스터 엑셀 저장 완료 (총 {len(df)}행, 시도: {attempt + 1}/{max_retries})")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Excel 저장 실패 (시도 {attempt + 1}/{max_retries}): {e}")
+            
+            if attempt < max_retries - 1:
+                logger.info(f"🔄 {retry_delay}초 후 재시도...")
+                time.sleep(retry_delay)
+            else:
+                logger.error(f"❌ 최대 재시도 횟수 초과. Excel 저장 포기.")
+                
+                # 로컬 백업 저장 시도
+                try:
+                    local_path = f'/tmp/{MASTER_FILENAME}'
+                    out_buffer.seek(0)
+                    with open(local_path, 'wb') as f:
+                        f.write(out_buffer.read())
+                    
+                    logger.info(f"💾 로컬 백업 저장 완료: {local_path}")
+                    logger.info("📢 관리자: Firebase Storage 문제를 해결하고 워커를 재시작하세요!")
+                except Exception as backup_error:
+                    logger.error(f"❌ 로컬 백업도 실패: {backup_error}")
+                
+                return False
+    
+    return False
 
 def process_certificate(user_uid, cert_id, cert_data, df):
     """
-    단일 수료증 처리
+    단일 수료증 처리 - 실패 시 플래그 롤백 포함
     
     Args:
         user_uid: 사용자 UID
@@ -282,34 +319,18 @@ def process_certificate(user_uid, cert_id, cert_data, df):
         # DataFrame에 추가
         df = pd.concat([df, new_row], ignore_index=True)
         
-        # Firestore 플래그 업데이트
-        cert_ref = db.collection('users').document(user_uid) \
-                     .collection('completedCertificates').document(cert_id)
-        
-        update_data = {
-            'excelUpdated': True,
-            'processedAt': firestore.SERVER_TIMESTAMP,
-            'processedBy': 'certificate_worker'
-        }
-        
-        # readyForExcel 필드가 있다면 false로 설정
-        if 'readyForExcel' in cert_data:
-            update_data['readyForExcel'] = False
-        
-        cert_ref.update(update_data)
-        
-        logger.info(f"✅ 처리 완료: {user_uid[:8]}.../{cert_id[:8]}... - {lecture_title}")
+        logger.info(f"✅ 수료증 데이터 처리 완료: {user_uid[:8]}.../{cert_id[:8]}... - {lecture_title}")
         return True, df
         
     except Exception as e:
         logger.error(f"❌ 수료증 처리 실패 ({user_uid[:8]}.../{cert_id[:8]}...): {e}")
         
-        # 에러 기록
+        # 에러 기록 (플래그는 변경하지 않음)
         try:
             cert_ref = db.collection('users').document(user_uid) \
                          .collection('completedCertificates').document(cert_id)
             cert_ref.update({
-                'excelUpdateError': str(e),
+                'processingError': str(e),
                 'errorOccurredAt': firestore.SERVER_TIMESTAMP
             })
         except Exception as update_error:
@@ -317,8 +338,48 @@ def process_certificate(user_uid, cert_id, cert_data, df):
             
         return False, df
 
+def update_certificate_flags(processed_certs, success=True):
+    """
+    처리된 수료증들의 플래그를 일괄 업데이트
+    
+    Args:
+        processed_certs: 처리된 수료증 리스트 [(user_uid, cert_id, cert_data), ...]
+        success: Excel 저장 성공 여부
+    """
+    for user_uid, cert_id, cert_data in processed_certs:
+        try:
+            cert_ref = db.collection('users').document(user_uid) \
+                         .collection('completedCertificates').document(cert_id)
+            
+            if success:
+                # 성공 시: 완료 플래그 설정
+                update_data = {
+                    'excelUpdated': True,
+                    'processedAt': firestore.SERVER_TIMESTAMP,
+                    'processedBy': 'certificate_worker'
+                }
+                
+                # readyForExcel 필드가 있다면 false로 설정
+                if 'readyForExcel' in cert_data:
+                    update_data['readyForExcel'] = False
+                
+                cert_ref.update(update_data)
+                logger.debug(f"✅ 플래그 업데이트 완료: {user_uid[:8]}.../{cert_id[:8]}...")
+                
+            else:
+                # 실패 시: 재시도를 위해 플래그 유지하고 에러 기록만
+                cert_ref.update({
+                    'excelSaveError': 'Excel 저장 실패 - 다음 주기에 재시도',
+                    'excelSaveErrorAt': firestore.SERVER_TIMESTAMP,
+                    'retryCount': firestore.Increment(1)
+                })
+                logger.warning(f"⚠️ 재시도 대상으로 유지: {user_uid[:8]}.../{cert_id[:8]}...")
+                
+        except Exception as e:
+            logger.error(f"❌ 플래그 업데이트 실패 ({user_uid[:8]}.../{cert_id[:8]}...): {e}")
+
 def process_batch():
-    """배치 처리 실행"""
+    """배치 처리 실행 - 개선된 버전"""
     try:
         # 처리할 수료증 조회
         pending_certs = get_pending_certificates(limit=BATCH_SIZE)
@@ -336,8 +397,9 @@ def process_batch():
         # 처리 통계
         success_count = 0
         error_count = 0
+        processed_certs = []  # 성공적으로 처리된 수료증 목록
         
-        # 각 수료증 처리
+        # 각 수료증 처리 (Excel 저장은 아직 안 함)
         for i, (user_uid, cert_id, cert_data) in enumerate(pending_certs, 1):
             if shutdown_flag:
                 logger.info("🛑 종료 플래그 감지, 처리 중단")
@@ -348,18 +410,27 @@ def process_batch():
             
             if success:
                 success_count += 1
+                processed_certs.append((user_uid, cert_id, cert_data))
             else:
                 error_count += 1
         
-        # 변경사항이 있으면 저장
+        # Excel 저장 시도 (성공한 것들만)
         if success_count > 0:
             new_row_count = len(df)
-            logger.info(f"📊 Excel 업데이트: {original_row_count}행 → {new_row_count}행 (+{new_row_count - original_row_count})")
+            logger.info(f"📊 Excel 저장 시도: {original_row_count}행 → {new_row_count}행 (+{new_row_count - original_row_count})")
             
-            if save_master_excel(df):
+            excel_save_success = save_master_excel(df)
+            
+            if excel_save_success:
+                # Excel 저장 성공 → 모든 처리된 수료증의 플래그 업데이트
+                update_certificate_flags(processed_certs, success=True)
                 logger.info(f"🎉 배치 처리 완료 - ✅성공: {success_count}, ❌실패: {error_count}")
+                
             else:
-                logger.error("❌ 마스터 엑셀 저장 실패")
+                # Excel 저장 실패 → 플래그 롤백 (재시도 가능하도록)
+                update_certificate_flags(processed_certs, success=False)
+                logger.error(f"❌ Excel 저장 실패 - 수료증들이 다음 주기에 재시도됩니다")
+                logger.info(f"📊 배치 처리 - 데이터 처리: {success_count}, Excel 저장: 실패, 기타 실패: {error_count}")
         else:
             logger.info(f"📊 배치 처리 완료 - 처리된 항목 없음 (❌실패: {error_count})")
         
