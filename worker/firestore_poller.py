@@ -1,56 +1,46 @@
-# worker/firestore_poller.py - 수정된 버전 (Wasabi vs Firebase Storage 구분)
+# worker/realtime_certificate_worker.py - 백엔드 수정 없이 실시간 처리
 
 import os
-import time
 import io
-import warnings
-import pandas as pd
-from datetime import datetime, timezone
+import time
+import logging
 import signal
 import sys
-import logging
-from typing import List, Tuple, Dict, Any
-
-# Firebase Admin SDK 사용
+import threading
+from datetime import datetime, timedelta
+import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore, storage
+from concurrent.futures import ThreadPoolExecutor
+import queue
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 로깅 설정 개선
-# ─────────────────────────────────────────────────────────────────────────────
+# ===================================================================
+# 로깅 설정
+# ===================================================================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('worker.log', encoding='utf-8')
+        logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger('FirestorePoller')
+logger = logging.getLogger('RealtimeCertificateWorker')
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ===================================================================
 # 환경변수 및 설정
-# ─────────────────────────────────────────────────────────────────────────────
-POLL_INTERVAL_SECONDS = int(os.getenv('POLL_INTERVAL_SECONDS', '60'))
-BATCH_SIZE = int(os.getenv('BATCH_SIZE', '100'))
+# ===================================================================
+REALTIME_POLL_INTERVAL = int(os.getenv('REALTIME_POLL_INTERVAL', '5'))  # 5초마다 체크
+BACKGROUND_POLL_INTERVAL = int(os.getenv('BACKGROUND_POLL_INTERVAL', '120'))  # 2분마다 체크
+BATCH_SIZE = int(os.getenv('BATCH_SIZE', '20'))
 MASTER_FILENAME = "master_certificates.xlsx"
 
-# Firebase Storage 버킷 이름 (수료증 엑셀 저장용)
-FIREBASE_STORAGE_BUCKET = os.getenv("GCLOUD_STORAGE_BUCKET")
-if not FIREBASE_STORAGE_BUCKET:
-    # fallback으로 .firebasestorage.app 형식 사용
-    FIREBASE_STORAGE_BUCKET = f"{os.environ['project_id']}.firebasestorage.app"
-
-logger.info(f"🔍 Firebase Storage 버킷: {FIREBASE_STORAGE_BUCKET}")
-
-# ─────────────────────────────────────────────────────────────────────────────
+# ===================================================================
 # Firebase 초기화
-# ─────────────────────────────────────────────────────────────────────────────
+# ===================================================================
 def initialize_firebase():
     """Firebase Admin SDK 초기화"""
     try:
         if not firebase_admin._apps:
-            # Railway 환경변수에서 자격증명 생성
             firebase_creds = {
                 "type": os.environ.get("type", "service_account"),
                 "project_id": os.environ["project_id"],
@@ -65,26 +55,14 @@ def initialize_firebase():
             }
             
             cred = credentials.Certificate(firebase_creds)
-            
-            # Firebase Storage 버킷 명시적 설정
             firebase_admin.initialize_app(cred, {
-                'storageBucket': FIREBASE_STORAGE_BUCKET
+                'storageBucket': f"{os.environ['project_id']}.appspot.com"
             })
-            
-            logger.info(f"✅ Firebase Admin 초기화 완료")
             
         db = firestore.client()
         bucket = storage.bucket()
         
-        # 버킷 접근 테스트
-        try:
-            # 버킷이 존재하는지 간단히 테스트 (실제 파일 조회 시도)
-            blobs = list(bucket.list_blobs(max_results=1))
-            logger.info(f"✅ Firebase Storage 버킷 접근 성공: {bucket.name}")
-        except Exception as e:
-            logger.warning(f"⚠️ 버킷 접근 테스트 중 오류 (버킷이 비어있을 수 있음): {e}")
-        
-        logger.info(f"✅ Firebase 초기화 완료 - Project: {os.environ['project_id']}, Storage: {FIREBASE_STORAGE_BUCKET}")
+        logger.info(f"✅ Firebase 초기화 완료 - Project: {os.environ['project_id']}")
         return db, bucket
         
     except Exception as e:
@@ -94,24 +72,31 @@ def initialize_firebase():
 # Firebase 클라이언트 초기화
 db, bucket = initialize_firebase()
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 전역 변수: 정상 종료 시그널 처리
-# ─────────────────────────────────────────────────────────────────────────────
+# ===================================================================
+# 전역 변수
+# ===================================================================
 shutdown_flag = False
+processing_queue = queue.Queue()
+realtime_stats = {
+    'processed_realtime': 0,
+    'processed_background': 0,
+    'failed': 0,
+    'last_activity': None
+}
 
 def signal_handler(signum, frame):
-    """SIGINT/SIGTERM 시그널 핸들러"""
+    """종료 시그널 핸들러"""
     global shutdown_flag
     logger.info(f"🛑 종료 시그널 받음 ({signum}). 안전하게 종료합니다...")
     shutdown_flag = True
 
-# 시그널 핸들러 등록
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 헬스체크
-# ─────────────────────────────────────────────────────────────────────────────
+# ===================================================================
+# 수료증 처리 핵심 함수들
+# ===================================================================
+
 def update_health_status():
     """헬스체크 파일 업데이트"""
     try:
@@ -120,375 +105,493 @@ def update_health_status():
     except Exception as e:
         logger.warning(f"헬스 파일 업데이트 실패: {e}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 수료증 조회 및 처리 함수들
-# ─────────────────────────────────────────────────────────────────────────────
-def fetch_unprocessed_certs(limit=100) -> List[Tuple[str, str, Dict[str, Any]]]:
+def is_valid_pdf_url(pdf_url):
+    """PDF URL 유효성 검사"""
+    if not pdf_url:
+        return False, "PDF URL이 비어있음"
+    
+    if not isinstance(pdf_url, str):
+        return False, f"PDF URL이 문자열이 아님: {type(pdf_url)}"
+    
+    pdf_url = pdf_url.strip()
+    if not pdf_url:
+        return False, "PDF URL이 공백만 포함"
+    
+    if not pdf_url.startswith('https://firebasestorage.googleapis.com'):
+        return False, f"Firebase Storage URL이 아님: {pdf_url[:100]}..."
+    
+    return True, "유효함"
+
+def get_fresh_certificates(limit=20):
     """
-    collection_group을 사용해서 users/{uid}/completedCertificates 아래의 모든 문서를 조회.
-    excelUpdated가 False이고 readyForExcel이 True인 문서만 결과 리스트에 추가.
-    반환 값: [(user_uid, cert_id, cert_data_dict), ...]
+    최근 생성된 수료증 조회 (5분 이내)
+    실시간 처리용
     """
-    results = []
     try:
-        # readyForExcel=True이고 excelUpdated=False인 문서만 조회 (더 효율적)
-        query = db.collection_group("completedCertificates") \
-                  .where("readyForExcel", "==", True) \
-                  .where("excelUpdated", "==", False) \
-                  .limit(limit)
+        # 5분 이내 생성된 것들만
+        recent_threshold = datetime.utcnow() - timedelta(minutes=5)
         
-        all_certs = list(query.stream())
-        logger.debug(f"🔍 쿼리 결과: {len(all_certs)}개 문서")
+        query = db.collection_group('completedCertificates') \
+                  .where('readyForExcel', '==', True) \
+                  .where('excelUpdated', '==', False) \
+                  .limit(limit * 2)  # 여유분 확보
+        
+        results = []
+        for doc in query.stream():
+            try:
+                data = doc.to_dict()
+                issued_at = data.get('issuedAt')
+                
+                # 최근 생성된 것인지 확인
+                if hasattr(issued_at, 'to_datetime'):
+                    issued_time = issued_at.to_datetime().replace(tzinfo=None)
+                    if issued_time >= recent_threshold:
+                        
+                        # PDF URL 검증
+                        pdf_url = data.get('pdfUrl', '')
+                        is_valid, reason = is_valid_pdf_url(pdf_url)
+                        
+                        if is_valid:
+                            path_parts = doc.reference.path.split('/')
+                            if len(path_parts) >= 4:
+                                user_uid = path_parts[1]
+                                cert_id = doc.id
+                                results.append((user_uid, cert_id, data, 'fresh'))
+                                
+                                if len(results) >= limit:
+                                    break
+                        else:
+                            # 무효한 PDF URL은 에러 마킹
+                            mark_as_error(doc.reference, f"PDF URL 검증 실패: {reason}")
+                            
+            except Exception as e:
+                logger.error(f"문서 파싱 오류 {doc.id}: {e}")
+        
+        if results:
+            logger.info(f"🚀 실시간 처리 대상: {len(results)}개")
+        return results
         
     except Exception as e:
-        logger.error(f"❌ collection_group 쿼리 실패: {e}")
-        return results
+        logger.error(f"❌ 최신 수료증 조회 실패: {e}")
+        return []
 
-    for cert_doc in all_certs:
-        try:
-            data = cert_doc.to_dict()
-            
-            # 추가 검증: PDF URL이 있는지 확인
-            if not data.get("pdfUrl"):
-                logger.warning(f"⚠️ 문서 {cert_doc.id}에 PDF URL이 없습니다. 건너뜁니다.")
-                # 에러 상태로 마킹
-                _mark_as_error(cert_doc.reference, "PDF URL이 없음")
-                continue
-
-            # 문서 경로 예시: "users/{userId}/completedCertificates/{certId}"
-            path_parts = cert_doc.reference.path.split("/")
-            if len(path_parts) < 4:
-                logger.warning(f"⚠️ 잘못된 문서 경로: {cert_doc.reference.path}")
-                continue
+def get_old_pending_certificates(limit=30):
+    """
+    오래된 미처리 수료증 조회 (5분 이상)
+    백그라운드 처리용
+    """
+    try:
+        old_threshold = datetime.utcnow() - timedelta(minutes=5)
+        
+        query = db.collection_group('completedCertificates') \
+                  .where('readyForExcel', '==', True) \
+                  .where('excelUpdated', '==', False) \
+                  .limit(limit * 2)
+        
+        results = []
+        for doc in query.stream():
+            try:
+                data = doc.to_dict()
+                issued_at = data.get('issuedAt')
                 
-            user_uid = path_parts[1]
-            cert_id  = path_parts[3]
+                # 오래된 것인지 확인
+                if hasattr(issued_at, 'to_datetime'):
+                    issued_time = issued_at.to_datetime().replace(tzinfo=None)
+                    if issued_time < old_threshold:
+                        
+                        # PDF URL 검증
+                        pdf_url = data.get('pdfUrl', '')
+                        is_valid, reason = is_valid_pdf_url(pdf_url)
+                        
+                        if is_valid:
+                            path_parts = doc.reference.path.split('/')
+                            if len(path_parts) >= 4:
+                                user_uid = path_parts[1]
+                                cert_id = doc.id
+                                results.append((user_uid, cert_id, data, 'old'))
+                                
+                                if len(results) >= limit:
+                                    break
+                        else:
+                            mark_as_error(doc.reference, f"PDF URL 검증 실패: {reason}")
+                            
+            except Exception as e:
+                logger.error(f"문서 파싱 오류 {doc.id}: {e}")
+        
+        if results:
+            logger.info(f"🕰️ 백그라운드 처리 대상: {len(results)}개")
+        return results
+        
+    except Exception as e:
+        logger.error(f"❌ 오래된 수료증 조회 실패: {e}")
+        return []
 
-            results.append((user_uid, cert_id, data))
-            
-        except Exception as e:
-            logger.error(f"❌ 문서 파싱 실패 {cert_doc.id}: {e}")
-
-    logger.info(f"📋 {len(results)}개의 처리 대기 수료증 발견")
-    return results
-
-def get_user_info(user_uid: str) -> Dict[str, str]:
+def get_user_info(user_uid):
     """사용자 정보 조회"""
     try:
-        user_ref = db.collection("users").document(user_uid)
-        user_snapshot = user_ref.get()
+        user_doc = db.collection('users').document(user_uid).get()
         
-        if user_snapshot.exists:
-            user_data = user_snapshot.to_dict()
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
             return {
-                'name': user_data.get("name", ""),
-                'phone': user_data.get("phone", ""),
-                'email': user_data.get("email", "")
+                'name': user_data.get('name', ''),
+                'phone': user_data.get('phone', ''),
+                'email': user_data.get('email', '')
             }
         else:
-            logger.warning(f"⚠️ 사용자 문서 {user_uid}가 존재하지 않습니다.")
-            return {'name': "", 'phone': "", 'email': ""}
+            logger.warning(f"사용자 문서 없음: {user_uid}")
+            return {'name': '', 'phone': '', 'email': ''}
             
     except Exception as e:
-        logger.error(f"❌ 사용자 정보 조회 실패 ({user_uid}): {e}")
-        return {'name': "", 'phone': "", 'email': ""}
+        logger.error(f"사용자 정보 조회 실패 ({user_uid}): {e}")
+        return {'name': '', 'phone': '', 'email': ''}
 
 def get_or_create_master_excel():
-    """Firebase Storage에서 마스터 엑셀 파일 가져오기 또는 생성"""
-    try:
-        master_blob = bucket.blob(MASTER_FILENAME)
-        
-        # 기존 파일 다운로드 시도
+    """마스터 엑셀 파일 가져오기 또는 생성 (스레드 안전)"""
+    max_retries = 3
+    
+    for attempt in range(max_retries):
         try:
-            existing_bytes = master_blob.download_as_bytes()
-            excel_buffer = io.BytesIO(existing_bytes)
-            df = pd.read_excel(excel_buffer, engine="openpyxl")
-            logger.debug(f"📥 기존 마스터 엑셀 로드 완료 (행 수: {len(df)})")
+            master_blob = bucket.blob(MASTER_FILENAME)
             
-            # 기존 DataFrame에서 불필요한 열 삭제
-            columns_to_remove = ['User UID', 'Lecture Title', 'Issued At']
-            for col in columns_to_remove:
-                if col in df.columns:
-                    df = df.drop(columns=[col])
-                    logger.debug(f"🗑️ 불필요한 컬럼 제거: {col}")
+            try:
+                existing_bytes = master_blob.download_as_bytes()
+                excel_buffer = io.BytesIO(existing_bytes)
+                df = pd.read_excel(excel_buffer, engine='openpyxl')
+                logger.debug(f"📥 기존 마스터 엑셀 로드 완료 (행 수: {len(df)})")
+                
+                # Cert ID 컬럼 확인
+                if 'Cert ID' not in df.columns:
+                    df['Cert ID'] = ""
+                    
+            except Exception:
+                logger.info("📄 새 마스터 엑셀 파일 생성")
+                df = pd.DataFrame(columns=[
+                    '업데이트 날짜', '사용자 UID', '전화번호', '이메일',
+                    '사용자 이름', '강의 제목', '발급 일시', 'PDF URL', 'Cert ID'
+                ])
+                
+            return df
             
         except Exception as e:
-            # 새 DataFrame 생성
-            logger.info(f"📄 새 마스터 엑셀 파일 생성: {e}")
-            df = pd.DataFrame(columns=[
-                '업데이트 날짜',
-                '사용자 UID',
-                '전화번호',
-                '이메일',
-                '사용자 이름',
-                '강의 제목',
-                '발급 일시',
-                'PDF URL',
-                'Cert ID'
-            ])
-
-        # 'Cert ID' 컬럼 확인 및 생성
-        if 'Cert ID' not in df.columns:
-            df['Cert ID'] = ""
-            logger.debug("📋 'Cert ID' 컬럼 추가")
-            
-        return df
-        
-    except Exception as e:
-        logger.error(f"❌ 마스터 엑셀 처리 실패: {e}")
-        raise
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 2
+                logger.warning(f"⚠️ 엑셀 로드 실패 (시도 {attempt + 1}/{max_retries}), {wait_time}초 후 재시도: {e}")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"❌ 마스터 엑셀 로드 최종 실패: {e}")
+                raise
 
 def save_master_excel(df):
-    """Firebase Storage에 마스터 엑셀 파일 저장"""
-    try:
-        # DataFrame을 엑셀로 변환
-        out_buffer = io.BytesIO()
-        with pd.ExcelWriter(out_buffer, engine="openpyxl") as writer:
-            df.to_excel(writer, index=False, sheet_name="Certificates")
-        out_buffer.seek(0)
-        
-        # Firebase Storage에 업로드
-        master_blob = bucket.blob(MASTER_FILENAME)
-        master_blob.upload_from_file(
-            out_buffer,
-            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        
-        logger.info("✅ 마스터 엑셀 저장 완료")
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ 마스터 엑셀 저장 실패: {e}")
-        return False
-
-def update_excel_for_cert(user_uid: str, cert_id: str, cert_info: Dict[str, Any], df) -> Tuple[bool, any]:
-    """
-    수료증 정보를 마스터 엑셀에 추가
+    """마스터 엑셀 파일 저장 (재시도 포함)"""
+    max_retries = 3
     
-    Returns:
-        Tuple[bool, DataFrame]: (성공여부, 업데이트된 DataFrame)
+    for attempt in range(max_retries):
+        try:
+            out_buffer = io.BytesIO()
+            with pd.ExcelWriter(out_buffer, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Certificates')
+            out_buffer.seek(0)
+            
+            master_blob = bucket.blob(MASTER_FILENAME)
+            master_blob.upload_from_file(
+                out_buffer,
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            
+            logger.debug("✅ 마스터 엑셀 저장 완료")
+            return True
+            
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 2
+                logger.warning(f"⚠️ 엑셀 저장 실패 (시도 {attempt + 1}/{max_retries}), {wait_time}초 후 재시도: {e}")
+                time.sleep(wait_time)
+            else:
+                logger.error(f"❌ 마스터 엑셀 저장 최종 실패: {e}")
+                return False
+
+def process_certificate_batch(certificates, process_type='realtime'):
     """
+    수료증 배치 처리 (스레드 안전)
+    """
+    if not certificates:
+        return 0, 0
+    
     try:
-        # --- 1) 사용자 프로필 정보 조회 ---
-        user_info = get_user_info(user_uid)
-
-        # --- 2) 수료증 정보 추출 ---
-        lecture_title = cert_info.get("lectureTitle", cert_id)
-        issued_at_ts = cert_info.get("issuedAt")
-        pdf_url = cert_info.get("pdfUrl", "")
-
-        # PDF URL 재검증
-        if not pdf_url:
-            logger.error(f"❌ cert {cert_id}에 PDF URL이 없습니다")
-            return False, df
-
-        # Firestore Timestamp → 문자열
-        if hasattr(issued_at_ts, "to_datetime"):
-            issued_str = issued_at_ts.to_datetime().strftime("%Y-%m-%d %H:%M:%S")
-        else:
-            issued_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-
-        # --- 3) 중복 체크 (안전한 방식) ---
-        if not df.empty and 'Cert ID' in df.columns:
-            existing_cert_ids = df['Cert ID'].astype(str).values
-            if cert_id in existing_cert_ids:
-                logger.warning(f"⚠️ cert_id={cert_id}가 이미 엑셀에 존재합니다. 처리 완료로 마킹합니다.")
-                _mark_as_processed(user_uid, cert_id)
-                return True, df
-
-        # --- 4) 새 행 생성 및 추가 ---
-        updated_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        new_row = pd.DataFrame([{
-            '업데이트 날짜': updated_date,
-            '사용자 UID': user_uid,
-            '전화번호': user_info['phone'],
-            '이메일': user_info['email'],
-            '사용자 이름': user_info['name'],
-            '강의 제목': lecture_title,
-            '발급 일시': issued_str,
-            'PDF URL': pdf_url,
-            'Cert ID': cert_id
-        }])
-
-        df = pd.concat([df, new_row], ignore_index=True)
-        logger.debug(f"➕ 새 행 추가: {user_uid}/{cert_id}. 총 행 수: {len(df)}")
-
-        # --- 5) Firestore 플래그 업데이트 ---
-        if _mark_as_processed(user_uid, cert_id):
-            logger.info(f"✅ 수료증 처리 완료: {user_uid}/{cert_id} - {lecture_title}")
-            return True, df
-        else:
-            return False, df
-        
-    except Exception as e:
-        logger.error(f"❌ 수료증 처리 중 예상치 못한 오류 ({user_uid}/{cert_id}): {e}")
-        _mark_as_error_with_details(user_uid, cert_id, str(e))
-        return False, df
-
-def _mark_as_processed(user_uid: str, cert_id: str) -> bool:
-    """Firestore 문서에 처리 완료 플래그 설정"""
-    try:
-        cert_ref = db.collection("users").document(user_uid) \
-                     .collection("completedCertificates").document(cert_id)
-        cert_ref.update({
-            "excelUpdated": True,
-            "readyForExcel": False,
-            "processedAt": firestore.SERVER_TIMESTAMP,
-            "processedBy": "firestore_poller"
-        })
-        logger.debug(f"✅ {user_uid}/{cert_id} 처리 완료로 마킹")
-        return True
-    except Exception as e:
-        logger.error(f"❌ 플래그 업데이트 실패 ({user_uid}/{cert_id}): {e}")
-        return False
-
-def _mark_as_error(doc_ref, error_message: str):
-    """문서에 에러 상태 마킹"""
-    try:
-        doc_ref.update({
-            "excelUpdateError": error_message,
-            "errorOccurredAt": firestore.SERVER_TIMESTAMP,
-            "readyForExcel": False
-        })
-    except Exception as e:
-        logger.error(f"에러 마킹 실패: {e}")
-
-def _mark_as_error_with_details(user_uid: str, cert_id: str, error_message: str):
-    """Firestore 문서에 에러 상태 마킹"""
-    try:
-        cert_ref = db.collection("users").document(user_uid) \
-                     .collection("completedCertificates").document(cert_id)
-        cert_ref.update({
-            "excelUpdateError": error_message,
-            "errorOccurredAt": firestore.SERVER_TIMESTAMP,
-            "readyForExcel": False
-        })
-    except Exception as e:
-        logger.error(f"에러 마킹 실패 ({user_uid}/{cert_id}): {e}")
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 배치 처리 함수
-# ─────────────────────────────────────────────────────────────────────────────
-def process_batch():
-    """배치 처리 실행"""
-    try:
-        # 처리할 수료증 조회
-        unprocessed = fetch_unprocessed_certs(limit=BATCH_SIZE)
-        
-        if not unprocessed:
-            logger.debug("😴 처리할 수료증이 없습니다")
-            return
-        
-        # 마스터 엑셀 로드
+        # 마스터 엑셀 로드 (한 번만)
         df = get_or_create_master_excel()
+        initial_count = len(df)
         
-        # 처리 통계
         success_count = 0
         error_count = 0
         
         # 각 수료증 처리
-        for user_uid, cert_id, cert_info in unprocessed:
+        for user_uid, cert_id, cert_data, reason in certificates:
             if shutdown_flag:
-                logger.info("🛑 종료 플래그 감지, 처리 중단")
                 break
                 
-            success, df = update_excel_for_cert(user_uid, cert_id, cert_info, df)
-            
-            if success:
-                success_count += 1
-            else:
+            try:
+                # 중복 확인
+                if not df.empty and 'Cert ID' in df.columns:
+                    existing_cert_ids = df['Cert ID'].astype(str).values
+                    if cert_id in existing_cert_ids:
+                        logger.info(f"🔄 이미 엑셀에 존재: {cert_id}")
+                        mark_as_processed(user_uid, cert_id, process_type)
+                        success_count += 1
+                        continue
+                
+                # 사용자 정보 조회
+                user_info = get_user_info(user_uid)
+                
+                # 발급 시간 처리
+                issued_at = cert_data.get('issuedAt')
+                if hasattr(issued_at, 'to_datetime'):
+                    issued_str = issued_at.to_datetime().strftime('%Y-%m-%d %H:%M:%S')
+                else:
+                    issued_str = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                
+                # 새 행 추가
+                updated_date = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                new_row = pd.DataFrame([{
+                    '업데이트 날짜': updated_date,
+                    '사용자 UID': user_uid,
+                    '전화번호': user_info['phone'],
+                    '이메일': user_info['email'],
+                    '사용자 이름': user_info['name'],
+                    '강의 제목': cert_data.get('lectureTitle', cert_id),
+                    '발급 일시': issued_str,
+                    'PDF URL': cert_data.get('pdfUrl', ''),
+                    'Cert ID': cert_id
+                }])
+                
+                df = pd.concat([df, new_row], ignore_index=True)
+                
+                # Firestore 플래그 업데이트
+                if mark_as_processed(user_uid, cert_id, process_type):
+                    success_count += 1
+                    logger.info(f"✅ {process_type} 처리 완료: {user_uid}/{cert_id}")
+                else:
+                    error_count += 1
+                    
+            except Exception as e:
                 error_count += 1
+                logger.error(f"❌ 수료증 처리 실패 ({user_uid}/{cert_id}): {e}")
+                mark_as_error_with_details(user_uid, cert_id, str(e))
         
         # 변경사항이 있으면 저장
         if success_count > 0:
             if save_master_excel(df):
-                logger.info(f"📊 배치 처리 완료 - 성공: {success_count}, 실패: {error_count}")
+                final_count = len(df)
+                added_count = final_count - initial_count
+                logger.info(f"📊 {process_type} 배치 완료 - 성공: {success_count}, 실패: {error_count}, 추가된 행: {added_count}")
             else:
-                logger.error("❌ 마스터 엑셀 저장 실패")
+                logger.error(f"❌ {process_type} 엑셀 저장 실패")
+                return 0, success_count + error_count
+        
+        return success_count, error_count
         
     except Exception as e:
-        logger.error(f"❌ 배치 처리 중 오류: {e}")
+        logger.error(f"❌ {process_type} 배치 처리 중 오류: {e}")
+        return 0, len(certificates)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 헬스체크 및 통계 함수들
-# ─────────────────────────────────────────────────────────────────────────────
-def get_pending_count() -> int:
-    """처리 대기 중인 수료증 개수 조회"""
+def mark_as_processed(user_uid, cert_id, process_type):
+    """Firestore 문서에 처리 완료 마킹"""
     try:
-        query = db.collection_group("completedCertificates") \
-                  .where("readyForExcel", "==", True) \
-                  .where("excelUpdated", "==", False)
-        return len(list(query.stream()))
+        cert_ref = db.collection('users').document(user_uid) \
+                     .collection('completedCertificates').document(cert_id)
+        
+        update_data = {
+            'excelUpdated': True,
+            'readyForExcel': False,
+            'processedAt': firestore.SERVER_TIMESTAMP,
+            'processedBy': f'realtime_worker_{process_type}'
+        }
+        
+        # 기존 에러 필드들 제거
+        cert_snapshot = cert_ref.get()
+        if cert_snapshot.exists:
+            existing_data = cert_snapshot.to_dict()
+            if existing_data.get('excelUpdateError'):
+                update_data['excelUpdateError'] = firestore.DELETE_FIELD
+            if existing_data.get('errorOccurredAt'):
+                update_data['errorOccurredAt'] = firestore.DELETE_FIELD
+        
+        cert_ref.update(update_data)
+        return True
+        
     except Exception as e:
-        logger.error(f"❌ 대기 수 조회 실패: {e}")
-        return -1
+        logger.error(f"❌ 플래그 업데이트 실패 ({user_uid}/{cert_id}): {e}")
+        return False
 
-def log_statistics():
-    """워커 통계 로깅"""
+def mark_as_error(doc_ref, error_message):
+    """문서에 에러 상태 마킹"""
     try:
-        pending_count = get_pending_count()
-        if pending_count >= 0:
-            logger.info(f"📊 대기 중인 수료증: {pending_count}개")
-        else:
-            logger.warning(f"⚠️ 대기 수를 가져올 수 없습니다")
+        doc_ref.update({
+            'excelUpdateError': error_message,
+            'errorOccurredAt': firestore.SERVER_TIMESTAMP,
+            'readyForExcel': False
+        })
     except Exception as e:
-        logger.error(f"❌ 통계 로깅 오류: {e}")
+        logger.error(f"에러 마킹 실패: {e}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 메인 루프: 주기적으로 폴링 실행
-# ─────────────────────────────────────────────────────────────────────────────
-def run_poller():
-    """메인 폴링 루프"""
-    logger.info(f"🚀 Firestore Poller 시작 (간격: {POLL_INTERVAL_SECONDS}초, 배치 크기: {BATCH_SIZE})")
-    logger.info(f"📦 Firebase Storage 버킷: {FIREBASE_STORAGE_BUCKET}")
-    
-    # 시작 시 통계 로깅
-    log_statistics()
-    
-    # 초기 헬스 상태
-    update_health_status()
-    
-    iteration_count = 0
-    successful_updates = 0
-    failed_updates = 0
+def mark_as_error_with_details(user_uid, cert_id, error_message):
+    """상세 에러 마킹"""
+    try:
+        cert_ref = db.collection('users').document(user_uid) \
+                     .collection('completedCertificates').document(cert_id)
+        cert_ref.update({
+            'excelUpdateError': error_message,
+            'errorOccurredAt': firestore.SERVER_TIMESTAMP,
+            'readyForExcel': False
+        })
+    except Exception as e:
+        logger.error(f"상세 에러 마킹 실패 ({user_uid}/{cert_id}): {e}")
+
+# ===================================================================
+# 이중 모드 워커: 실시간 + 백그라운드
+# ===================================================================
+
+def realtime_worker():
+    """실시간 워커 스레드 (5초마다 체크)"""
+    logger.info("🚀 실시간 워커 스레드 시작")
     
     while not shutdown_flag:
         try:
-            iteration_count += 1
-            logger.debug(f"🔄 폴링 반복 #{iteration_count}")
+            # 최근 생성된 수료증 조회
+            fresh_certs = get_fresh_certificates(limit=BATCH_SIZE)
             
-            # 헬스체크 업데이트
-            update_health_status()
+            if fresh_certs:
+                success, failed = process_certificate_batch(fresh_certs, 'realtime')
+                realtime_stats['processed_realtime'] += success
+                realtime_stats['failed'] += failed
+                realtime_stats['last_activity'] = datetime.utcnow()
             
-            # 배치 처리 실행
-            process_batch()
-            
-            # 10번째 반복마다 통계 로깅
-            if iteration_count % 10 == 0:
-                logger.info(f"📈 상태 - 처리: {successful_updates}, 실패: {failed_updates}")
-                log_statistics()
-            
-            # 종료 시그널 체크하면서 대기
-            for _ in range(POLL_INTERVAL_SECONDS):
+            # 짧은 간격으로 대기
+            for _ in range(REALTIME_POLL_INTERVAL):
                 if shutdown_flag:
                     break
                 time.sleep(1)
                 
-        except KeyboardInterrupt:
-            logger.info("⌨️ 키보드 인터럽트")
-            break
         except Exception as e:
-            failed_updates += 1
-            logger.error(f"❌ 폴링 루프 오류: {e}")
-            time.sleep(min(POLL_INTERVAL_SECONDS, 30))  # 에러 시 최대 30초만 대기
+            logger.error(f"❌ 실시간 워커 오류: {e}")
+            time.sleep(10)
+    
+    logger.info("👋 실시간 워커 스레드 종료")
 
-    logger.info(f"🏁 Poller 종료. 최종 통계 - 성공: {successful_updates}, 실패: {failed_updates}")
+def background_worker():
+    """백그라운드 워커 스레드 (2분마다 체크)"""
+    logger.info("🕰️ 백그라운드 워커 스레드 시작")
+    
+    while not shutdown_flag:
+        try:
+            # 오래된 미처리 수료증 조회
+            old_certs = get_old_pending_certificates(limit=BATCH_SIZE)
+            
+            if old_certs:
+                success, failed = process_certificate_batch(old_certs, 'background')
+                realtime_stats['processed_background'] += success
+                realtime_stats['failed'] += failed
+                realtime_stats['last_activity'] = datetime.utcnow()
+            
+            # 긴 간격으로 대기
+            for _ in range(BACKGROUND_POLL_INTERVAL):
+                if shutdown_flag:
+                    break
+                time.sleep(1)
+                
+        except Exception as e:
+            logger.error(f"❌ 백그라운드 워커 오류: {e}")
+            time.sleep(30)
+    
+    logger.info("👋 백그라운드 워커 스레드 종료")
+
+def statistics_worker():
+    """통계 로깅 스레드 (10분마다)"""
+    logger.info("📊 통계 워커 스레드 시작")
+    
+    while not shutdown_flag:
+        try:
+            # 10분마다 통계 로깅
+            for _ in range(600):  # 10분 = 600초
+                if shutdown_flag:
+                    break
+                time.sleep(1)
+            
+            if not shutdown_flag:
+                logger.info(f"📈 누적 통계:")
+                logger.info(f"  🚀 실시간 처리: {realtime_stats['processed_realtime']}")
+                logger.info(f"  🕰️ 백그라운드 처리: {realtime_stats['processed_background']}")
+                logger.info(f"  ❌ 실패: {realtime_stats['failed']}")
+                logger.info(f"  🕐 마지막 활동: {realtime_stats['last_activity']}")
+                
+        except Exception as e:
+            logger.error(f"❌ 통계 워커 오류: {e}")
+    
+    logger.info("👋 통계 워커 스레드 종료")
+
+# ===================================================================
+# 메인 함수
+# ===================================================================
+
+def run_dual_mode_worker():
+    """이중 모드 워커 실행"""
+    logger.info("🚀 실시간 수료증 워커 시작")
+    logger.info(f"   ⚡ 실시간 체크: {REALTIME_POLL_INTERVAL}초마다")
+    logger.info(f"   🕰️ 백그라운드 체크: {BACKGROUND_POLL_INTERVAL}초마다")
+    logger.info(f"   📦 배치 크기: {BATCH_SIZE}")
+    
+    # 초기 헬스 상태
+    update_health_status()
+    
+    # 스레드 풀 생성
+    threads = []
+    
+    try:
+        # 실시간 워커 스레드
+        realtime_thread = threading.Thread(target=realtime_worker, daemon=True)
+        realtime_thread.start()
+        threads.append(realtime_thread)
+        
+        # 백그라운드 워커 스레드
+        background_thread = threading.Thread(target=background_worker, daemon=True)
+        background_thread.start()
+        threads.append(background_thread)
+        
+        # 통계 워커 스레드
+        stats_thread = threading.Thread(target=statistics_worker, daemon=True)
+        stats_thread.start()
+        threads.append(stats_thread)
+        
+        # 메인 루프 (헬스체크만)
+        while not shutdown_flag:
+            update_health_status()
+            time.sleep(30)  # 30초마다 헬스체크
+            
+    except KeyboardInterrupt:
+        logger.info("⌨️ 키보드 인터럽트")
+    except Exception as e:
+        logger.error(f"❌ 메인 워커 오류: {e}")
+    finally:
+        # 모든 스레드 종료 대기
+        logger.info("🛑 모든 워커 스레드 종료 대기 중...")
+        for thread in threads:
+            if thread.is_alive():
+                thread.join(timeout=10)
+        
+        logger.info("🏁 실시간 수료증 워커 종료 완료")
+        logger.info(f"📊 최종 통계:")
+        logger.info(f"   🚀 실시간 처리: {realtime_stats['processed_realtime']}")
+        logger.info(f"   🕰️ 백그라운드 처리: {realtime_stats['processed_background']}")
+        logger.info(f"   ❌ 총 실패: {realtime_stats['failed']}")
+
+# ===================================================================
+# 엔트리 포인트
+# ===================================================================
 
 if __name__ == "__main__":
     try:
-        run_poller()
+        run_dual_mode_worker()
     except Exception as e:
         logger.error(f"❌ 워커 시작 실패: {e}")
         sys.exit(1)
-    finally:
-        logger.info("👋 워커 종료 완료")
