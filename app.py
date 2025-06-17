@@ -1,4 +1,4 @@
-# backend/app.py - Flutter 완전 호환 버전 (언어별 영상 지원)
+# backend/app.py - Flutter 완전 호환 버전 (언어별 영상 지원) - 관리자 인증 문제 해결
 
 import os
 import uuid
@@ -552,7 +552,7 @@ def verify_jwt_token(token: str) -> bool:
         return False
 
 def admin_required(f):
-    """관리자 인증 데코레이터"""
+    """관리자 인증 데코레이터 (JWT 전용)"""
     @wraps(f)
     def decorated(*args, **kwargs):
         auth_header = request.headers.get('Authorization', None)
@@ -564,6 +564,27 @@ def admin_required(f):
             return jsonify({'error': '유효하지 않은 또는 만료된 토큰'}), 401
 
         return f(*args, **kwargs)
+    return decorated
+
+# ==== 🆕 수정된 관리자 인증 데코레이터 (세션과 JWT 둘 다 지원) ====
+def admin_required_flexible(f):
+    """유연한 관리자 인증 데코레이터 - 세션 또는 JWT 토큰 둘 중 하나만 있어도 허용"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        # 1. 세션 확인
+        if session.get('logged_in'):
+            return f(*args, **kwargs)
+        
+        # 2. JWT 토큰 확인
+        auth_header = request.headers.get('Authorization', None)
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ', 1)[1]
+            if verify_jwt_token(token):
+                return f(*args, **kwargs)
+        
+        # 3. 둘 다 없으면 인증 실패
+        return jsonify({'error': '관리자 인증이 필요합니다'}), 401
+    
     return decorated
 
 # ===================================================================
@@ -701,16 +722,13 @@ def _get_language_flag(lang_code):
     return flags.get(lang_code, '🌐')
 
 # ===================================================================
-# 🆕 관리자용 언어별 영상 관리 API
+# 🆕 관리자용 언어별 영상 관리 API (수정됨)
 # ===================================================================
 
 @app.route('/api/admin/videos', methods=['GET'])
+@admin_required_flexible  # 🔧 변경됨
 def get_admin_videos():
     """관리자용 영상 목록 조회 - 언어별 영상 상태 포함"""
-    # 세션 기반 인증 확인
-    if not session.get('logged_in'):
-        return jsonify({'error': '관리자 로그인이 필요합니다'}), 401
-    
     try:
         app.logger.info("📋 관리자 영상 목록 조회 시작")
         
@@ -783,22 +801,9 @@ def get_admin_videos():
         return jsonify({'error': '영상 목록을 가져올 수 없습니다'}), 500
 
 @app.route('/api/admin/upload_language_video', methods=['POST'])
+@admin_required_flexible  # 🔧 변경됨
 def upload_language_video():
     """언어별 영상 업로드 - 개선된 버전"""
-    
-    # 세션 또는 JWT 토큰 인증 확인
-    session_auth = session.get('logged_in', False)
-    token_auth = False
-    
-    # JWT 토큰 확인
-    auth_header = request.headers.get('Authorization', '')
-    if auth_header.startswith('Bearer '):
-        token = auth_header.split(' ', 1)[1]
-        token_auth = verify_jwt_token(token)
-    
-    if not (session_auth or token_auth):
-        return jsonify({'error': '관리자 인증이 필요합니다'}), 401
-    
     try:
         file = request.files.get('file')
         group_id = request.form.get('group_id', '').strip()
@@ -939,6 +944,94 @@ def upload_language_video():
             'success': False,
             'error': f'업로드 중 오류가 발생했습니다: {str(e)}'
         }), 500
+
+# ==== 🆕 관리자 영상 삭제 API (추가) ====
+@app.route('/api/admin/delete_language_video', methods=['DELETE'])
+@admin_required_flexible
+def delete_language_video():
+    """언어별 영상 삭제"""
+    try:
+        data = request.get_json() or {}
+        group_id = data.get('group_id', '').strip()
+        language_code = data.get('language_code', '').strip()
+        
+        if not group_id or not language_code:
+            return jsonify({'error': 'group_id와 language_code가 필요합니다'}), 400
+            
+        if language_code == 'ko':
+            return jsonify({'error': '한국어 원본 영상은 삭제할 수 없습니다'}), 400
+            
+        # 번역 문서 확인
+        trans_ref = db.collection('uploads').document(group_id) \
+                     .collection('translations').document(language_code)
+        trans_doc = trans_ref.get()
+        
+        if not trans_doc.exists:
+            return jsonify({'error': '해당 언어의 영상을 찾을 수 없습니다'}), 404
+            
+        trans_data = trans_doc.to_dict()
+        video_key = trans_data.get('video_key')
+        
+        if not video_key:
+            return jsonify({'error': '영상 파일이 없습니다'}), 404
+        
+        # S3에서 삭제
+        try:
+            s3.delete_object(Bucket=BUCKET_NAME, Key=video_key)
+            app.logger.info(f"S3 영상 삭제 완료: {video_key}")
+        except Exception as s3_error:
+            app.logger.error(f"S3 삭제 실패: {s3_error}")
+        
+        # Firestore 업데이트 (영상 정보만 제거, 번역 텍스트는 유지)
+        trans_ref.update({
+            'video_key': firestore.DELETE,
+            'video_presigned_url': firestore.DELETE,
+            'video_uploaded_at': firestore.DELETE,
+            'video_file_size': firestore.DELETE,
+            'video_file_name': firestore.DELETE,
+            'video_duration': firestore.DELETE
+        })
+        
+        # 루트 문서 업데이트
+        root_ref = db.collection('uploads').document(group_id)
+        root_ref.update({
+            f'lang_{language_code}_video': False
+        })
+        
+        app.logger.info(f"✅ 언어별 영상 삭제 완료: {group_id} - {language_code}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'{SUPPORTED_LANGUAGES[language_code]} 영상이 삭제되었습니다.',
+            'group_id': group_id,
+            'language': language_code
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"영상 삭제 실패: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'삭제 중 오류가 발생했습니다: {str(e)}'
+        }), 500
+
+# ==== 🆕 세션 상태 확인 API (추가) ====
+@app.route('/api/admin/check_auth', methods=['GET'])
+def check_admin_auth():
+    """관리자 인증 상태 확인"""
+    session_auth = session.get('logged_in', False)
+    
+    auth_header = request.headers.get('Authorization', '')
+    token_auth = False
+    if auth_header.startswith('Bearer '):
+        token = auth_header.split(' ', 1)[1]
+        token_auth = verify_jwt_token(token)
+    
+    return jsonify({
+        'authenticated': session_auth or token_auth,
+        'session_auth': session_auth,
+        'token_auth': token_auth,
+        'message': '인증됨' if (session_auth or token_auth) else '인증 필요'
+    })
 
 # ===================================================================
 # 🆕 Flutter 호환 비디오 시청 API
@@ -1654,8 +1747,9 @@ def health_check():
         }), 500
 
 @app.route('/api/admin/stats', methods=['GET'])
+@admin_required_flexible  # 🔧 변경됨
 def get_admin_stats():
-    """관리자용 통계 - 인증 필요없이 기본 통계만"""
+    """관리자용 통계"""
     try:
         total_videos = len(list(db.collection('uploads').stream()))
         
@@ -1727,6 +1821,7 @@ if __name__ == "__main__":
     app.logger.info(f"📱 지원 언어: {', '.join(SUPPORTED_LANGUAGES.values())}")
     app.logger.info(f"🌐 언어별 영상 업로드 지원")
     app.logger.info(f"🎬 실시간 진행도 추적")
+    app.logger.info(f"🔒 관리자 인증 개선: 세션 + JWT 동시 지원")
     
     if os.environ.get('RAILWAY_ENVIRONMENT'):
         app.run(host="0.0.0.0", port=port, debug=False)
