@@ -1,4 +1,4 @@
-# backend/app.py - 언어별 영상 지원 추가 (기존 코드 99% 유지)
+# backend/app.py - Flutter 완전 호환 버전 (언어별 영상 지원)
 
 import os
 import uuid
@@ -69,14 +69,14 @@ SECRET_KEY        = os.environ.get('FLASK_SECRET_KEY', 'supersecret')
 translator = None
 translation_lock = threading.Lock()
 
-# 지원 언어 코드 매핑 - 중국어 코드 수정 및 검증된 언어만 포함
+# 지원 언어 코드 매핑 - Flutter와 동일하게 맞춤
 SUPPORTED_LANGUAGES = {
     'ko': '한국어',
     'en': 'English',
-    'zh': '中文(简体)',      # 'zh-cn' → 'zh'로 변경 (Google Translate 표준)
+    'zh': '中文',        # Flutter와 일치
     'vi': 'Tiếng Việt',
     'th': 'ไทย',
-    'ja': '日本語'          # 우즈베크어 제거 (번역 품질 이슈)
+    'ja': '日本語'
 }
 
 # 번역 캐시 (메모리 효율성)
@@ -154,6 +154,10 @@ def after_request(response):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['X-XSS-Protection'] = '1; mode=block'
+    # CORS 설정 (Flutter 앱 지원)
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     return response
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -202,7 +206,9 @@ def translate_text_safe(text, target_language, max_retries=2):
             if len(text) > 500:
                 text = text[:500] + "..."
             
-            result = translator_instance.translate(text, src='ko', dest=target_language)
+            # 중국어 처리 수정
+            dest_lang = 'zh' if target_language == 'zh' else target_language
+            result = translator_instance.translate(text, src='ko', dest=dest_lang)
             translated_text = result.text
             
             # 캐시 저장 (크기 제한)
@@ -287,10 +293,9 @@ def download_korean_font_safe():
     font_urls = [
         "https://fonts.gstatic.com/s/notosanskr/v27/PbykFmXiEBPT4ITbgNA5Cgm20xz64px_1hVWr0wuPNGmlQNMEfD4.ttf",
         "https://cdn.jsdelivr.net/gh/fonts-archive/NotoSansKR/NotoSansKR-Regular.ttf",
-        "https://github.com/notofonts/noto-cjk/releases/download/Sans2.004/02_NotoSansCJK-TTF.zip"
     ]
     
-    for i, font_url in enumerate(font_urls[:2]):  # ZIP은 제외 (복잡함)
+    for i, font_url in enumerate(font_urls):
         try:
             app.logger.info(f"폰트 다운로드 시도 {i+1}: {font_url.split('/')[-1]}")
             
@@ -562,11 +567,11 @@ def admin_required(f):
     return decorated
 
 # ===================================================================
-# 다국어 처리 함수들 (성능 최적화)
+# 🆕 Flutter 호환 다국어 처리 함수들 (성능 최적화)
 # ===================================================================
 
-def get_video_with_translation(group_id, lang_code='ko'):
-    """특정 언어로 비디오 정보 조회 - 언어별 비디오 지원 추가"""
+def get_video_with_language_support(group_id, lang_code='ko'):
+    """Flutter와 호환되는 언어별 비디오 정보 조회"""
     try:
         root_doc = db.collection('uploads').document(group_id).get()
         if not root_doc.exists:
@@ -574,147 +579,487 @@ def get_video_with_translation(group_id, lang_code='ko'):
         
         root_data = root_doc.to_dict()
         
-        # 기본 비디오 URL과 키
+        # 기본 비디오 URL과 키 (한국어 원본)
         video_url = root_data.get('presigned_url', '')
         video_key = root_data.get('video_key', '')
         
-        # 언어별 번역 문서 조회
-        translation_doc = db.collection('uploads').document(group_id) \
-                           .collection('translations').document(lang_code).get()
+        # 기본 정보 설정
+        display_data = {
+            'display_title': root_data.get('group_name', ''),
+            'display_main_category': root_data.get('main_category', ''),
+            'display_sub_category': root_data.get('sub_category', ''),
+            'display_sub_sub_category': root_data.get('sub_sub_category', ''),
+            'current_language': 'ko',
+            'language_name': '한국어'
+        }
         
-        if translation_doc.exists:
-            translation_data = translation_doc.to_dict()
+        # 🆕 언어별 번역 문서 조회
+        if lang_code != 'ko':
+            translation_doc = db.collection('uploads').document(group_id) \
+                               .collection('translations').document(lang_code).get()
             
-            # 언어별 비디오가 있는지 확인
-            if translation_data.get('video_key'):
-                video_key = translation_data['video_key']
-                video_url = translation_data.get('video_presigned_url', '')
+            if translation_doc.exists:
+                translation_data = translation_doc.to_dict()
                 
-                # URL 갱신 필요한 경우
-                if not video_url or is_presigned_url_expired(video_url, 60):
-                    video_url = generate_presigned_url(video_key, expires_in=604800)
-                    # 비동기로 URL 업데이트
-                    translation_doc.reference.update({
-                        'video_presigned_url': video_url,
-                        'url_updated_at': datetime.utcnow().isoformat()
-                    })
-            
-            root_data.update({
-                'display_title': translation_data.get('title', root_data.get('group_name')),
-                'display_main_category': translation_data.get('main_category', root_data.get('main_category')),
-                'display_sub_category': translation_data.get('sub_category', root_data.get('sub_category')),
-                'display_sub_sub_category': translation_data.get('sub_sub_category', root_data.get('sub_sub_category')),
-                'current_language': lang_code,
-                'language_name': translation_data.get('language_name', SUPPORTED_LANGUAGES.get(lang_code, lang_code)),
-                'video_key': video_key,
-                'presigned_url': video_url
-            })
-        else:
-            # 번역이 없으면 한국어 사용
-            root_data.update({
-                'display_title': root_data.get('group_name'),
-                'display_main_category': root_data.get('main_category'),
-                'display_sub_category': root_data.get('sub_category'),
-                'display_sub_sub_category': root_data.get('sub_sub_category'),
-                'current_language': 'ko',
-                'language_name': '한국어'
+                # 🎬 언어별 비디오가 있는지 확인
+                if translation_data.get('video_key'):
+                    video_key = translation_data['video_key']
+                    video_url = translation_data.get('video_presigned_url', '')
+                    
+                    # URL 갱신 필요한 경우
+                    if not video_url or is_presigned_url_expired(video_url, 60):
+                        video_url = generate_presigned_url(video_key, expires_in=604800)
+                        # 비동기로 URL 업데이트
+                        translation_doc.reference.update({
+                            'video_presigned_url': video_url,
+                            'url_updated_at': datetime.utcnow().isoformat()
+                        })
+                
+                # 번역된 텍스트 정보 업데이트
+                display_data.update({
+                    'display_title': translation_data.get('title', root_data.get('group_name')),
+                    'display_main_category': translation_data.get('main_category', root_data.get('main_category')),
+                    'display_sub_category': translation_data.get('sub_category', root_data.get('sub_category')),
+                    'display_sub_sub_category': translation_data.get('sub_sub_category', root_data.get('sub_sub_category')),
+                    'current_language': lang_code,
+                    'language_name': translation_data.get('language_name', SUPPORTED_LANGUAGES.get(lang_code, lang_code))
+                })
+        
+        # 한국어 원본 URL 갱신 확인
+        if lang_code == 'ko' and (not video_url or is_presigned_url_expired(video_url, 60)):
+            video_url = generate_presigned_url(video_key, expires_in=604800)
+            root_doc.reference.update({
+                'presigned_url': video_url,
+                'updated_at': datetime.utcnow().isoformat()
             })
         
-        return root_data
+        # 최종 데이터 구성
+        result = {
+            **root_data,
+            **display_data,
+            'video_key': video_key,
+            'presigned_url': video_url
+        }
+        
+        return result
         
     except Exception as e:
-        app.logger.error(f"비디오 조회 실패 ({group_id}, {lang_code}): {e}")
+        app.logger.error(f"언어별 비디오 조회 실패 ({group_id}, {lang_code}): {e}")
         return None
 
+def get_available_languages_for_video(group_id):
+    """특정 비디오에서 사용 가능한 언어 목록 조회 - Flutter 호환"""
+    try:
+        available = {'ko': True}  # 한국어 원본은 항상 존재
+        
+        # translations 컬렉션 조회
+        translations_ref = db.collection('uploads').document(group_id).collection('translations')
+        trans_docs = translations_ref.stream()
+        
+        for trans_doc in trans_docs:
+            lang_code = trans_doc.id
+            trans_data = trans_doc.to_dict()
+            
+            # video_key가 있으면 해당 언어 영상 존재
+            has_video = bool(trans_data.get('video_key'))
+            
+            if lang_code in SUPPORTED_LANGUAGES:
+                available[lang_code] = has_video
+        
+        # 지원하는 모든 언어에 대해 기본값 설정
+        for lang_code in SUPPORTED_LANGUAGES.keys():
+            if lang_code not in available:
+                available[lang_code] = False
+        
+        # Flutter 앱 호환 형식으로 변환
+        available_list = []
+        for lang_code, has_video in available.items():
+            if has_video:
+                available_list.append({
+                    'code': lang_code,
+                    'name': SUPPORTED_LANGUAGES[lang_code],
+                    'flag': _get_language_flag(lang_code),
+                    'available': True
+                })
+        
+        return available_list
+        
+    except Exception as e:
+        app.logger.error(f"사용 가능한 언어 조회 실패 ({group_id}): {e}")
+        return [{'code': 'ko', 'name': '한국어', 'flag': '🇰🇷', 'available': True}]
+
+def _get_language_flag(lang_code):
+    """언어 코드에 대한 국기 이모지 반환"""
+    flags = {
+        'ko': '🇰🇷',
+        'en': '🇺🇸', 
+        'zh': '🇨🇳',
+        'vi': '🇻🇳',
+        'th': '🇹🇭',
+        'ja': '🇯🇵'
+    }
+    return flags.get(lang_code, '🌐')
+
 # ===================================================================
-# 🆕 언어별 영상 업로드 API 추가
+# 🆕 관리자용 언어별 영상 관리 API
 # ===================================================================
 
+@app.route('/api/admin/videos', methods=['GET'])
+def get_admin_videos():
+    """관리자용 영상 목록 조회 - 언어별 영상 상태 포함"""
+    # 세션 기반 인증 확인
+    if not session.get('logged_in'):
+        return jsonify({'error': '관리자 로그인이 필요합니다'}), 401
+    
+    try:
+        app.logger.info("📋 관리자 영상 목록 조회 시작")
+        
+        # Firestore에서 전체 영상 목록 가져오기
+        uploads_ref = db.collection('uploads')
+        docs = uploads_ref.order_by('created_at', direction=firestore.Query.DESCENDING).stream()
+        
+        videos = []
+        
+        for doc in docs:
+            try:
+                data = doc.to_dict()
+                group_id = doc.id
+                
+                # 패키지는 제외 (일반 영상만)
+                if data.get('is_package'):
+                    continue
+                
+                # 언어별 영상 상태 확인
+                languages = {'ko': True}  # 한국어 원본은 항상 존재
+                
+                # translations 서브컬렉션 조회
+                translations_ref = doc.reference.collection('translations')
+                trans_docs = translations_ref.stream()
+                
+                for trans_doc in trans_docs:
+                    trans_data = trans_doc.to_dict()
+                    lang_code = trans_doc.id
+                    
+                    # video_key가 있으면 해당 언어 영상이 업로드됨
+                    has_video = bool(trans_data.get('video_key'))
+                    languages[lang_code] = has_video
+                
+                # 지원하는 모든 언어에 대해 상태 설정
+                for lang_code in SUPPORTED_LANGUAGES.keys():
+                    if lang_code not in languages:
+                        languages[lang_code] = False
+                
+                video_info = {
+                    'group_id': group_id,
+                    'title': data.get('group_name', '제목 없음'),
+                    'main_category': data.get('main_category', ''),
+                    'sub_category': data.get('sub_category', ''),
+                    'sub_sub_category': data.get('sub_sub_category', ''),
+                    'upload_date': data.get('upload_date', ''),
+                    'created_at': data.get('created_at', ''),
+                    'time': data.get('time', '0:00'),
+                    'level': data.get('level', ''),
+                    'tag': data.get('tag', ''),
+                    'languages': languages,
+                    'translation_status': data.get('translation_status', 'unknown')
+                }
+                
+                videos.append(video_info)
+                
+            except Exception as doc_error:
+                app.logger.error(f"문서 처리 오류 ({doc.id}): {doc_error}")
+                continue
+        
+        app.logger.info(f"✅ 영상 목록 조회 완료: {len(videos)}개")
+        
+        return jsonify({
+            'videos': videos,
+            'total_count': len(videos),
+            'supported_languages': SUPPORTED_LANGUAGES
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"❌ 영상 목록 조회 실패: {e}")
+        return jsonify({'error': '영상 목록을 가져올 수 없습니다'}), 500
+
 @app.route('/api/admin/upload_language_video', methods=['POST'])
-@admin_required
 def upload_language_video():
-    """언어별 영상 업로드 - translations 컬렉션에 video_key 추가"""
+    """언어별 영상 업로드 - 개선된 버전"""
+    
+    # 세션 또는 JWT 토큰 인증 확인
+    session_auth = session.get('logged_in', False)
+    token_auth = False
+    
+    # JWT 토큰 확인
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header.startswith('Bearer '):
+        token = auth_header.split(' ', 1)[1]
+        token_auth = verify_jwt_token(token)
+    
+    if not (session_auth or token_auth):
+        return jsonify({'error': '관리자 인증이 필요합니다'}), 401
+    
     try:
         file = request.files.get('file')
-        group_id = request.form.get('group_id')
-        language_code = request.form.get('language_code', 'en')
+        group_id = request.form.get('group_id', '').strip()
+        language_code = request.form.get('language_code', '').strip()
         
-        if not file or not group_id:
-            return jsonify({'error': '파일과 group_id가 필요합니다.'}), 400
+        # 입력 검증
+        if not file or not group_id or not language_code:
+            return jsonify({'error': '파일, group_id, language_code가 모두 필요합니다'}), 400
             
         if language_code not in SUPPORTED_LANGUAGES or language_code == 'ko':
-            return jsonify({'error': '유효하지 않은 언어 코드입니다.'}), 400
+            return jsonify({'error': f'지원하지 않는 언어 코드입니다: {language_code}'}), 400
+        
+        if not file.filename:
+            return jsonify({'error': '유효한 파일을 선택해주세요'}), 400
+        
+        # 파일 크기 확인 (200MB 제한)
+        file.seek(0, 2)  # 파일 끝으로 이동
+        file_size = file.tell()
+        file.seek(0)  # 파일 처음으로 복원
+        
+        if file_size > 200 * 1024 * 1024:  # 200MB
+            return jsonify({'error': '파일 크기는 200MB를 초과할 수 없습니다'}), 400
+        
+        app.logger.info(f"🌐 언어별 영상 업로드 시작: {group_id} - {language_code} ({file_size:,} bytes)")
         
         # 원본 문서 확인
         root_doc = db.collection('uploads').document(group_id).get()
         if not root_doc.exists:
-            return jsonify({'error': '원본 영상을 찾을 수 없습니다.'}), 404
+            return jsonify({'error': '원본 영상을 찾을 수 없습니다'}), 404
             
         root_data = root_doc.to_dict()
         
+        # 이미 해당 언어 영상이 있는지 확인
+        trans_doc = db.collection('uploads').document(group_id) \
+                     .collection('translations').document(language_code).get()
+        
+        if trans_doc.exists and trans_doc.to_dict().get('video_key'):
+            return jsonify({'error': f'{SUPPORTED_LANGUAGES[language_code]} 영상이 이미 업로드되어 있습니다'}), 409
+        
         # 파일 이름에서 언어별 키 생성
         original_video_key = root_data.get('video_key', '')
+        if not original_video_key:
+            return jsonify({'error': '원본 영상 키를 찾을 수 없습니다'}), 400
+            
         folder = '/'.join(original_video_key.split('/')[:-1])  # 폴더 경로 추출
         ext = Path(file.filename).suffix.lower() or '.mp4'
         
-        # 언어별 비디오 키
+        # 언어별 비디오 키 생성
         language_video_key = f"{folder}/video_{language_code}{ext}"
         
-        # 임시 저장 및 S3 업로드
-        tmp_path = Path(tempfile.gettempdir()) / f"{group_id}_{language_code}{ext}"
-        file.save(tmp_path)
+        # 임시 파일로 저장
+        tmp_path = Path(tempfile.gettempdir()) / f"{group_id}_{language_code}_{uuid.uuid4().hex[:8]}{ext}"
         
-        # S3 업로드
-        s3.upload_file(str(tmp_path), BUCKET_NAME, language_video_key, Config=config)
-        tmp_path.unlink(missing_ok=True)
-        
-        # Presigned URL 생성
-        presigned_url = generate_presigned_url(language_video_key, expires_in=604800)
-        
-        # translations 컬렉션 업데이트
-        translation_ref = db.collection('uploads').document(group_id) \
-                           .collection('translations').document(language_code)
-        
-        # 기존 번역 데이터가 있는지 확인
-        trans_doc = translation_ref.get()
-        if trans_doc.exists:
-            # 기존 데이터에 video 정보만 추가
-            translation_ref.update({
+        try:
+            file.save(str(tmp_path))
+            app.logger.info(f"임시 파일 저장: {tmp_path}")
+            
+            # S3 업로드
+            s3.upload_file(str(tmp_path), BUCKET_NAME, language_video_key, Config=config)
+            app.logger.info(f"S3 업로드 완료: {language_video_key}")
+            
+            # Presigned URL 생성
+            presigned_url = generate_presigned_url(language_video_key, expires_in=604800)
+            
+            # 영상 길이 계산 (선택적)
+            video_duration = None
+            try:
+                with VideoFileClip(str(tmp_path)) as clip:
+                    duration_sec = int(clip.duration)
+                    minutes = duration_sec // 60
+                    seconds = duration_sec % 60
+                    video_duration = f"{minutes}:{seconds:02d}"
+            except Exception as duration_error:
+                app.logger.warning(f"영상 길이 계산 실패: {duration_error}")
+            
+            # translations 컬렉션 업데이트
+            translation_ref = db.collection('uploads').document(group_id) \
+                               .collection('translations').document(language_code)
+            
+            update_data = {
                 'video_key': language_video_key,
                 'video_presigned_url': presigned_url,
-                'video_uploaded_at': datetime.utcnow().isoformat()
-            })
-        else:
-            # 새로운 번역 문서 생성
-            translation_ref.set({
-                'title': root_data.get('group_name', ''),
-                'main_category': root_data.get('main_category', ''),
-                'sub_category': root_data.get('sub_category', ''),
-                'sub_sub_category': root_data.get('sub_sub_category', ''),
+                'video_uploaded_at': datetime.utcnow().isoformat(),
+                'video_file_size': file_size,
+                'video_file_name': file.filename,
                 'language_code': language_code,
                 'language_name': SUPPORTED_LANGUAGES[language_code],
-                'is_original': False,
-                'video_key': language_video_key,
-                'video_presigned_url': presigned_url,
-                'video_uploaded_at': datetime.utcnow().isoformat()
+                'is_original': False
+            }
+            
+            if video_duration:
+                update_data['video_duration'] = video_duration
+            
+            # 기존 번역 데이터가 있는지 확인
+            if trans_doc.exists:
+                # 기존 데이터에 video 정보만 추가
+                translation_ref.update(update_data)
+            else:
+                # 새로운 번역 문서 생성 (텍스트 번역도 포함)
+                update_data.update({
+                    'title': translate_text_safe(root_data.get('group_name', ''), language_code),
+                    'main_category': translate_text_safe(root_data.get('main_category', ''), language_code),
+                    'sub_category': translate_text_safe(root_data.get('sub_category', ''), language_code),
+                    'sub_sub_category': translate_text_safe(root_data.get('sub_sub_category', ''), language_code),
+                    'translated_at': datetime.utcnow().isoformat()
+                })
+                translation_ref.set(update_data)
+            
+            # 루트 문서 업데이트 (언어별 영상 추가됨을 표시)
+            root_doc.reference.update({
+                'has_language_videos': True,
+                'last_language_upload': datetime.utcnow().isoformat(),
+                f'lang_{language_code}_video': True
             })
+            
+            app.logger.info(f"✅ 언어별 영상 업로드 완료: {group_id} - {language_code}")
+            
+            return jsonify({
+                'success': True,
+                'message': f'{SUPPORTED_LANGUAGES[language_code]} 영상이 성공적으로 업로드되었습니다.',
+                'group_id': group_id,
+                'language': language_code,
+                'language_name': SUPPORTED_LANGUAGES[language_code],
+                'video_key': language_video_key,
+                'video_url': presigned_url,
+                'video_duration': video_duration,
+                'file_size_mb': round(file_size / (1024 * 1024), 2)
+            }), 200
+            
+        finally:
+            # 임시 파일 정리
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+            
+    except Exception as e:
+        app.logger.error(f"❌ 언어별 영상 업로드 실패: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'업로드 중 오류가 발생했습니다: {str(e)}'
+        }), 500
+
+# ===================================================================
+# 🆕 Flutter 호환 비디오 시청 API
+# ===================================================================
+
+@app.route('/watch/<group_id>', methods=['GET'])
+def watch(group_id):
+    """동영상 시청 페이지 - Flutter 완전 호환 (언어별 영상 지원)"""
+    try:
+        requested_lang = request.args.get('lang', 'ko')
         
-        app.logger.info(f"✅ 언어별 영상 업로드 완료: {group_id} - {language_code}")
+        if requested_lang not in SUPPORTED_LANGUAGES:
+            requested_lang = 'ko'
+        
+        user_agent = request.headers.get('User-Agent', '').lower()
+        is_flutter_app = 'flutter' in user_agent or 'dart' in user_agent
+        
+        # 🆕 언어별 비디오 정보 가져오기 (개선된 버전)
+        video_data = get_video_with_language_support(group_id, requested_lang)
+        if not video_data:
+            if is_flutter_app:
+                return jsonify({'error': 'Video not found'}), 404
+            else:
+                abort(404)
+        
+        # 🆕 사용 가능한 언어 목록 추가
+        available_languages = get_available_languages_for_video(group_id)
+        
+        if is_flutter_app:
+            # Flutter 앱용 응답 (video_warning_screen.dart 호환)
+            return jsonify({
+                'groupId': group_id,
+                'videoId': group_id,  # Flutter 호환성
+                'title': video_data['display_title'],
+                'group_name': video_data['display_title'],  # Flutter 호환성
+                'main_category': video_data['display_main_category'],
+                'sub_category': video_data['display_sub_category'],
+                'sub_sub_category': video_data['display_sub_sub_category'],
+                'video_url': video_data['presigned_url'],
+                'videoUrl': video_data['presigned_url'],  # Flutter 호환성
+                'qr_url': video_data.get('qr_presigned_url', ''),
+                'thumbnail_url': video_data.get('thumbnail_presigned_url', ''),
+                'language': requested_lang,
+                'selectedLanguage': requested_lang,  # Flutter 호환성
+                'language_name': video_data.get('language_name', '한국어'),
+                'time': video_data.get('time', '0:00'),
+                'level': video_data.get('level', ''),
+                'tag': video_data.get('tag', ''),
+                'available_languages': available_languages,
+                'has_language_videos': video_data.get('has_language_videos', False),
+                'supported_languages': SUPPORTED_LANGUAGES,  # Flutter 호환성
+                'success': True
+            })
+        else:
+            return render_template(
+                'watch.html',
+                video_url=video_data['presigned_url'],
+                video_data=video_data,
+                available_languages=available_languages,
+                supported_languages=SUPPORTED_LANGUAGES,
+                current_language=requested_lang
+            )
+            
+    except Exception as e:
+        app.logger.error(f"시청 페이지 오류: {e}")
+        if 'is_flutter_app' in locals() and is_flutter_app:
+            return jsonify({'error': '비디오 로드 중 오류 발생', 'success': False}), 500
+        else:
+            abort(500)
+
+# ===================================================================
+# 🆕 언어별 영상 URL 조회 API (Flutter video_warning_screen.dart 호환)
+# ===================================================================
+
+@app.route('/api/video/<group_id>/language/<lang_code>', methods=['GET'])
+def get_language_video_url(group_id, lang_code):
+    """특정 언어의 영상 URL 조회 - Flutter 호환"""
+    try:
+        if lang_code not in SUPPORTED_LANGUAGES:
+            return jsonify({'error': '지원하지 않는 언어입니다', 'success': False}), 400
+        
+        # 언어별 영상 정보 조회
+        video_data = get_video_with_language_support(group_id, lang_code)
+        if not video_data:
+            return jsonify({'error': '비디오를 찾을 수 없습니다', 'success': False}), 404
         
         return jsonify({
-            'message': '언어별 영상이 업로드되었습니다.',
+            'success': True,
             'group_id': group_id,
-            'language': language_code,
-            'video_key': language_video_key,
-            'video_url': presigned_url
+            'language': lang_code,
+            'language_name': SUPPORTED_LANGUAGES[lang_code],
+            'video_url': video_data['presigned_url'],
+            'title': video_data['display_title'],
+            'has_language_video': bool(video_data.get('video_key')),
+            'available_languages': get_available_languages_for_video(group_id)
         }), 200
         
     except Exception as e:
-        app.logger.error(f"언어별 영상 업로드 실패: {e}")
-        return jsonify({'error': str(e)}), 500
+        app.logger.error(f"언어별 영상 URL 조회 오류: {e}")
+        return jsonify({'error': '영상 정보를 가져올 수 없습니다', 'success': False}), 500
+
+@app.route('/api/video/<group_id>/languages', methods=['GET'])
+def get_video_languages(group_id):
+    """특정 비디오의 사용 가능한 언어 목록 API - Flutter 호환"""
+    try:
+        available_languages = get_available_languages_for_video(group_id)
+        
+        return jsonify({
+            'success': True,
+            'group_id': group_id,
+            'available_languages': available_languages,
+            'total_languages': len(available_languages),
+            'supported_languages': SUPPORTED_LANGUAGES
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"언어 목록 API 오류: {e}")
+        return jsonify({'error': '언어 목록을 가져올 수 없습니다', 'success': False}), 500
 
 # ===================================================================
-# 백그라운드 자동 갱신 시스템 (기존 코드 유지)
+# 백그라운드 자동 갱신 시스템 (언어별 영상 포함)
 # ===================================================================
 
 def refresh_expiring_urls():
@@ -1008,7 +1353,7 @@ def upload_video():
     )
 
 # ===================================================================
-# 나머지 라우팅 및 API 엔드포인트들 (기존 코드 유지, 에러 처리 강화)
+# 나머지 라우팅 및 API 엔드포인트들 (Flutter 호환성 강화)
 # ===================================================================
 
 @app.route('/', methods=['GET'])
@@ -1041,12 +1386,12 @@ def api_admin_login():
 
         if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
             token = create_jwt_for_admin()
-            return jsonify({'token': token}), 200
+            return jsonify({'token': token, 'success': True}), 200
         else:
-            return jsonify({'error': '관리자 인증 실패'}), 401
+            return jsonify({'error': '관리자 인증 실패', 'success': False}), 401
     except Exception as e:
         app.logger.error(f"API 로그인 오류: {e}")
-        return jsonify({'error': '로그인 처리 중 오류 발생'}), 500
+        return jsonify({'error': '로그인 처리 중 오류 발생', 'success': False}), 500
 
 @app.route('/upload_form', methods=['GET'])
 def upload_form():
@@ -1076,98 +1421,192 @@ def upload_form():
     }
     return render_template('upload_form.html', mains=main_cats, subs=sub_map, leafs=leaf_map)
 
-@app.route('/watch/<group_id>', methods=['GET'])
-def watch(group_id):
-    """동영상 시청 페이지 - 언어별 영상 지원"""
+# ===================================================================
+# 🆕 Flutter 전용 진행도 관리 API (video_playback_screen.dart 호환)
+# ===================================================================
+
+@app.route('/api/user/progress/<user_id>/<video_id>', methods=['GET'])
+def get_user_progress(user_id, video_id):
+    """사용자 진행도 조회 - Flutter 호환"""
     try:
-        requested_lang = request.args.get('lang', 'ko')
-        
-        if requested_lang not in SUPPORTED_LANGUAGES:
-            requested_lang = 'ko'
-        
-        user_agent = request.headers.get('User-Agent', '').lower()
-        is_flutter_app = 'flutter' in user_agent or 'dart' in user_agent
-        
-        # 언어별 비디오 정보 가져오기
-        video_data = get_video_with_translation(group_id, requested_lang)
-        if not video_data:
-            if is_flutter_app:
-                return jsonify({'error': 'Video not found'}), 404
-            else:
-                abort(404)
-        
-        # URL 갱신 (이미 get_video_with_translation에서 처리됨)
-        
-        if is_flutter_app:
+        # Firebase Auth 사용자 확인
+        user_doc = db.collection('users').document(user_id).get()
+        if not user_doc.exists:
             return jsonify({
-                'groupId': group_id,
-                'title': video_data['display_title'],
-                'main_category': video_data['display_main_category'],
-                'sub_category': video_data['display_sub_category'],
-                'video_url': video_data['presigned_url'],
-                'qr_url': video_data.get('qr_presigned_url', ''),
-                'thumbnail_url': video_data.get('thumbnail_presigned_url', ''),
-                'language': requested_lang,
-                'time': video_data.get('time', '0:00'),
-                'level': video_data.get('level', ''),
-                'tag': video_data.get('tag', '')
-            })
-        else:
-            return render_template(
-                'watch.html',
-                video_url=video_data['presigned_url'],
-                video_data=video_data,
-                available_languages=SUPPORTED_LANGUAGES,
-                current_language=requested_lang
-            )
-            
+                'success': False,
+                'progress': 0.0,
+                'watchedDuration': 0,
+                'lastWatchedLanguage': 'ko'
+            }), 200  # 사용자가 없어도 성공으로 처리
+        
+        user_data = user_doc.to_dict()
+        progress_map = user_data.get('progress', {})
+        watched_map = user_data.get('watchedDuration', {})
+        language_map = user_data.get('lastWatchedLanguage', {})
+        
+        return jsonify({
+            'success': True,
+            'progress': progress_map.get(video_id, 0.0),
+            'watchedDuration': watched_map.get(video_id, 0),
+            'lastWatchedLanguage': language_map.get(video_id, 'ko')
+        }), 200
+        
     except Exception as e:
-        app.logger.error(f"시청 페이지 오류: {e}")
-        if 'is_flutter_app' in locals() and is_flutter_app:
-            return jsonify({'error': '비디오 로드 중 오류 발생'}), 500
-        else:
-            abort(500)
+        app.logger.error(f"진행도 조회 오류: {e}")
+        return jsonify({
+            'success': False,
+            'error': '진행도를 가져올 수 없습니다',
+            'progress': 0.0,
+            'watchedDuration': 0,
+            'lastWatchedLanguage': 'ko'
+        }), 500
+
+@app.route('/api/user/progress', methods=['POST'])
+def save_user_progress():
+    """사용자 진행도 저장 - Flutter 호환"""
+    try:
+        data = request.get_json() or {}
+        user_id = data.get('userId') or data.get('user_id')
+        video_id = data.get('videoId') or data.get('video_id')
+        progress = data.get('progress', 0.0)
+        watched_duration = data.get('watchedDuration', 0)
+        language = data.get('language', 'ko')
+        is_completed = data.get('isCompleted', False)
+        lecture_title = data.get('lectureTitle', '')
+        
+        if not user_id or not video_id:
+            return jsonify({
+                'success': False,
+                'error': 'userId와 videoId가 필요합니다'
+            }), 400
+        
+        # 진행도 데이터 구성
+        update_data = {
+            f'progress.{video_id}': 1.0 if is_completed else progress,
+            f'watchedDuration.{video_id}': watched_duration,
+            f'lastWatched.{video_id}': firestore.SERVER_TIMESTAMP,
+            f'lastWatchedLanguage.{video_id}': language
+        }
+        
+        # 완료 처리
+        if is_completed:
+            update_data[f'completedLanguage.{video_id}'] = language
+            update_data['completedVideos'] = firestore.ArrayUnion([video_id])
+            
+            if lecture_title:
+                update_data['lastSelectedLectureId'] = video_id
+                update_data['lastSelectedLecture'] = lecture_title
+        
+        # Firestore 업데이트
+        user_ref = db.collection('users').document(user_id)
+        user_ref.update(update_data)
+        
+        app.logger.info(f"✅ 진행도 저장 완료: {user_id} - {video_id} ({language}) - {progress*100:.1f}%")
+        
+        return jsonify({
+            'success': True,
+            'message': '진행도가 저장되었습니다',
+            'saved_progress': progress,
+            'saved_language': language
+        }), 200
+        
+    except Exception as save_error:
+        app.logger.error(f"진행도 저장 실패: {save_error}")
+        
+        # 새 문서로 재시도
+        try:
+            user_ref = db.collection('users').document(user_id)
+            new_data = {
+                'progress': {video_id: 1.0 if is_completed else progress},
+                'watchedDuration': {video_id: watched_duration},
+                'lastWatched': {video_id: firestore.SERVER_TIMESTAMP},
+                'lastWatchedLanguage': {video_id: language}
+            }
+            
+            if is_completed:
+                new_data['completedVideos'] = [video_id]
+                new_data['completedLanguage'] = {video_id: language}
+                if lecture_title:
+                    new_data['lastSelectedLectureId'] = video_id
+                    new_data['lastSelectedLecture'] = lecture_title
+            
+            user_ref.set(new_data, merge=True)
+            
+            app.logger.info(f"✅ 새 문서로 진행도 저장 완료: {user_id} - {video_id}")
+            
+            return jsonify({
+                'success': True,
+                'message': '새 문서로 진행도가 저장되었습니다',
+                'saved_progress': progress,
+                'saved_language': language
+            }), 200
+            
+        except Exception as retry_error:
+            app.logger.error(f"진행도 저장 재시도도 실패: {retry_error}")
+            return jsonify({
+                'success': False,
+                'error': '진행도 저장에 실패했습니다'
+            }), 500
 
 # ===================================================================
-# 수료증 관련 API (기존 코드 유지)
+# 수료증 관련 API (Flutter 호환성 강화)
 # ===================================================================
 
 @app.route('/create_certificate', methods=['POST'])
 def create_certificate():
-    """수료증 발급"""
+    """수료증 발급 - Flutter 호환"""
     try:
         data = request.get_json() or {}
-        user_uid = data.get('user_uid')
-        cert_id = data.get('cert_id')
+        user_uid = data.get('user_uid') or data.get('userId')
+        cert_id = data.get('cert_id') or data.get('certId')
         lecture_title = data.get('lectureTitle', '')
         pdf_url = data.get('pdfUrl', '')
+        language = data.get('language', 'ko')  # 🆕 언어 정보 추가
 
         if not user_uid or not cert_id or not pdf_url:
-            return jsonify({'error': 'user_uid, cert_id, lectureTitle, pdfUrl이 필요합니다.'}), 400
+            return jsonify({
+                'success': False,
+                'error': 'user_uid, cert_id, lectureTitle, pdfUrl이 필요합니다.'
+            }), 400
 
         cert_ref = db.collection('users').document(user_uid) \
                      .collection('completedCertificates').document(cert_id)
-        cert_ref.set({
+        
+        cert_data = {
             'lectureTitle': lecture_title,
             'issuedAt': firestore.SERVER_TIMESTAMP,
             'pdfUrl': pdf_url,
             'excelUpdated': False,
-            'readyForExcel': True
-        }, merge=True)
+            'readyForExcel': True,
+            'language': language,  # 🆕 수료증 발급 언어
+            'createdAt': firestore.SERVER_TIMESTAMP
+        }
+        
+        cert_ref.set(cert_data, merge=True)
 
-        return jsonify({'message': '수료증이 생성되었습니다.'}), 200
+        app.logger.info(f"✅ 수료증 발급 완료: {user_uid} - {cert_id} ({language})")
+
+        return jsonify({
+            'success': True,
+            'message': '수료증이 생성되었습니다.',
+            'cert_id': cert_id,
+            'language': language
+        }), 200
         
     except Exception as e:
         app.logger.error(f"수료증 생성 오류: {e}")
-        return jsonify({'error': '수료증 생성 중 오류 발생'}), 500
+        return jsonify({
+            'success': False,
+            'error': '수료증 생성 중 오류 발생'
+        }), 500
 
 # ===================================================================
-# 헬스체크 및 관리 API
+# 헬스체크 및 관리 API (Flutter 호환성 강화)
 # ===================================================================
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """서비스 상태 확인"""
+    """서비스 상태 확인 - Flutter 호환"""
     try:
         # Firestore 연결 확인
         try:
@@ -1186,6 +1625,7 @@ def health_check():
         overall_status = 'healthy' if (firestore_status == 'healthy' and s3_status == 'healthy') else 'unhealthy'
         
         return jsonify({
+            'success': True,
             'status': overall_status,
             'timestamp': datetime.utcnow().isoformat(),
             'services': {
@@ -1194,32 +1634,60 @@ def health_check():
                 'scheduler': scheduler.running if 'scheduler' in globals() else False,
                 'translator': get_translator() is not None
             },
-            'supported_languages': list(SUPPORTED_LANGUAGES.keys()),
-            'version': '2.3.0-multilang-video'  # 버전 업데이트
+            'supported_languages': SUPPORTED_LANGUAGES,
+            'language_count': len(SUPPORTED_LANGUAGES),
+            'features': {
+                'multilingual_video_support': True,
+                'automatic_translation': True,
+                'real_time_progress_tracking': True,
+                'flutter_compatibility': True
+            },
+            'version': '2.4.0-flutter-compat'  # 버전 업데이트
         }), 200 if overall_status == 'healthy' else 503
         
     except Exception as e:
         app.logger.error(f"헬스체크 오류: {e}")
-        return jsonify({'status': 'error', 'message': '헬스체크 실패'}), 500
+        return jsonify({
+            'success': False,
+            'status': 'error', 
+            'message': '헬스체크 실패'
+        }), 500
 
 @app.route('/api/admin/stats', methods=['GET'])
-@admin_required
 def get_admin_stats():
-    """관리자용 통계"""
+    """관리자용 통계 - 인증 필요없이 기본 통계만"""
     try:
         total_videos = len(list(db.collection('uploads').stream()))
         
         return jsonify({
+            'success': True,
             'total_videos': total_videos,
             'supported_languages': len(SUPPORTED_LANGUAGES),
-            'scheduler_running': scheduler.running if 'scheduler' in globals() else False,
+            'language_list': list(SUPPORTED_LANGUAGES.keys()),
+            'features': {
+                'multilingual_video_support': True,
+                'automatic_translation': True,
+                'flutter_compatibility': True
+            },
             'translation_cache_size': len(translation_cache),
-            'multilingual_video_support': True  # 🆕 다국어 영상 지원 표시
+            'scheduler_running': scheduler.running if 'scheduler' in globals() else False
         }), 200
         
     except Exception as e:
         app.logger.error(f"통계 조회 실패: {e}")
-        return jsonify({'error': '통계를 가져올 수 없습니다.'}), 500
+        return jsonify({
+            'success': False,
+            'error': '통계를 가져올 수 없습니다.'
+        }), 500
+
+# ===================================================================
+# 🆕 OPTIONS 핸들러 (CORS 지원)
+# ===================================================================
+
+@app.route('/api/<path:path>', methods=['OPTIONS'])
+def handle_options(path):
+    """CORS preflight 요청 처리"""
+    return '', 200
 
 # ===================================================================
 # Railway 환경 초기화 및 시작
@@ -1239,7 +1707,7 @@ def initialize_railway_environment():
             import logging
             app.logger.setLevel(logging.INFO)
         
-        app.logger.info("🚂 Railway 환경 초기화 완료 (다국어 영상 지원)")
+        app.logger.info("🚂 Railway 환경 초기화 완료 (Flutter 완전 호환)")
         return True
         
     except Exception as e:
@@ -1254,6 +1722,11 @@ if __name__ == "__main__":
     start_background_scheduler()
     
     port = int(os.environ.get("PORT", 8080))
+    
+    app.logger.info(f"🚀 Flutter 호환 다국어 영상 플랫폼 시작")
+    app.logger.info(f"📱 지원 언어: {', '.join(SUPPORTED_LANGUAGES.values())}")
+    app.logger.info(f"🌐 언어별 영상 업로드 지원")
+    app.logger.info(f"🎬 실시간 진행도 추적")
     
     if os.environ.get('RAILWAY_ENVIRONMENT'):
         app.run(host="0.0.0.0", port=port, debug=False)
