@@ -1,5 +1,5 @@
 <!-- ===================================================================
-# templates/upload_form.html - 다국어 지원 강화 버전
+# templates/upload_form.html - 언어별 영상 업로드 지원
 =================================================================== -->
 <!doctype html>
 <html lang="ko">
@@ -11,7 +11,7 @@
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       padding: 20px;
-      max-width: 900px; /* 약간 더 넓게 */
+      max-width: 900px;
       margin: 0 auto;
       background-color: #f5f5f5;
     }
@@ -27,7 +27,7 @@
       text-align: center;
     }
     
-    /* 🆕 다국어 지원 안내 섹션 */
+    /* 다국어 지원 안내 섹션 */
     .multilingual-info {
       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
       color: white;
@@ -133,7 +133,7 @@
       font-size: 14px;
     }
     
-    /* 🆕 업로드 버튼 개선 */
+    /* 업로드 버튼 */
     button[type="submit"] {
       width: 100%;
       padding: 15px;
@@ -169,7 +169,7 @@
       margin-top: 5px;
     }
     
-    /* 🆕 다국어 관련 도움말 강조 */
+    /* 번역 도움말 강조 */
     .translation-help {
       background: #e8f5e8;
       border-left: 4px solid #2a9d8f;
@@ -199,7 +199,7 @@
       transition: width 0.3s;
     }
     
-    /* 🆕 ISO/IEC 표준 준수 안내 */
+    /* ISO/IEC 표준 준수 안내 */
     .iso-compliance {
       background: #fff3cd;
       border: 1px solid #ffeaa7;
@@ -221,13 +221,152 @@
       font-size: 14px;
       margin-bottom: 5px;
     }
+
+    /* 🆕 언어별 영상 업로드 섹션 */
+    .language-video-section {
+      margin-top: 50px;
+      padding: 30px;
+      background: #f8f9fa;
+      border: 2px dashed #007bff;
+      border-radius: 10px;
+    }
+    .language-video-section h3 {
+      color: #007bff;
+      margin-bottom: 20px;
+      text-align: center;
+    }
+    .existing-videos-list {
+      background: white;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 30px;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+    .video-item {
+      padding: 12px;
+      border: 1px solid #e0e0e0;
+      border-radius: 5px;
+      margin-bottom: 10px;
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+    .video-item:hover {
+      background: #f0f0f0;
+      border-color: #007bff;
+    }
+    .video-item.selected {
+      background: #e3f2fd;
+      border-color: #007bff;
+      box-shadow: 0 2px 5px rgba(0, 123, 255, 0.2);
+    }
+    .video-item-title {
+      font-weight: 600;
+      color: #333;
+      margin-bottom: 5px;
+    }
+    .video-item-info {
+      font-size: 13px;
+      color: #666;
+    }
+    .language-status {
+      display: flex;
+      gap: 5px;
+      margin-top: 8px;
+      flex-wrap: wrap;
+    }
+    .lang-badge {
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .lang-badge.has-video {
+      background: #d4edda;
+      color: #155724;
+    }
+    .lang-badge.no-video {
+      background: #f8d7da;
+      color: #721c24;
+    }
+    .language-upload-form {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      display: none;
+    }
+    .language-upload-form.active {
+      display: block;
+    }
+    .btn-language-upload {
+      background: linear-gradient(135deg, #007bff 0%, #0056b3 100%);
+      color: white;
+      border: none;
+      padding: 12px 20px;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 16px;
+      font-weight: 600;
+      transition: all 0.3s;
+      width: 100%;
+      margin-top: 15px;
+    }
+    .btn-language-upload:hover {
+      background: linear-gradient(135deg, #0056b3 0%, #004094 100%);
+      transform: translateY(-2px);
+      box-shadow: 0 4px 15px rgba(0, 123, 255, 0.3);
+    }
+    .btn-language-upload:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+
+    /* 탭 스타일 */
+    .tabs {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 30px;
+      border-bottom: 2px solid #e0e0e0;
+    }
+    .tab {
+      padding: 12px 24px;
+      background: none;
+      border: none;
+      font-size: 16px;
+      font-weight: 600;
+      color: #666;
+      cursor: pointer;
+      transition: all 0.3s;
+      position: relative;
+    }
+    .tab:hover {
+      color: #2a9d8f;
+    }
+    .tab.active {
+      color: #2a9d8f;
+    }
+    .tab.active::after {
+      content: '';
+      position: absolute;
+      bottom: -2px;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: #2a9d8f;
+    }
+    .tab-content {
+      display: none;
+    }
+    .tab-content.active {
+      display: block;
+    }
   </style>
 </head>
 <body>
   <div class="upload-container">
     <h2>🌍 다국어 강의 업로드 시스템</h2>
     
-    <!-- 🆕 다국어 지원 안내 섹션 -->
+    <!-- 다국어 지원 안내 섹션 -->
     <div class="multilingual-info">
       <h3>🚀 자동 다국어 번역 지원</h3>
       <p>한국어로 입력하시면 AI가 자동으로 다음 언어들로 번역합니다</p>
@@ -241,7 +380,7 @@
       </div>
     </div>
 
-    <!-- 🆕 ISO/IEC 표준 준수 안내 -->
+    <!-- ISO/IEC 표준 준수 안내 -->
     <div class="iso-compliance">
       <h4>📋 ISO/IEC 25023/25051/25041 표준 준수</h4>
       <ul>
@@ -251,97 +390,163 @@
         <li><strong>사용성:</strong> 직관적 인터페이스 및 접근성 지원</li>
       </ul>
     </div>
-    
-    <form method="post" action="/upload" enctype="multipart/form-data" id="uploadForm">
-      <div class="form-group">
-        <label for="group_name">강의명 <span class="required">*</span></label>
-        <input type="text" id="group_name" name="group_name" required placeholder="예: 기초 용접 안전교육" />
-        <div class="translation-help">
-          <div class="help-text">
-            💡 한국어로 입력하시면 자동으로 6개 언어로 번역되어 전 세계 사용자가 이용할 수 있습니다
+
+    <!-- 🆕 탭 메뉴 추가 -->
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('new-upload')">📤 새 강의 업로드</button>
+      <button class="tab" onclick="switchTab('language-video')">🌐 언어별 영상 추가</button>
+    </div>
+
+    <!-- 새 강의 업로드 탭 -->
+    <div id="new-upload" class="tab-content active">
+      <form method="post" action="/upload" enctype="multipart/form-data" id="uploadForm">
+        <div class="form-group">
+          <label for="group_name">강의명 <span class="required">*</span></label>
+          <input type="text" id="group_name" name="group_name" required placeholder="예: 기초 용접 안전교육" />
+          <div class="translation-help">
+            <div class="help-text">
+              💡 한국어로 입력하시면 자동으로 6개 언어로 번역되어 전 세계 사용자가 이용할 수 있습니다
+            </div>
           </div>
         </div>
-      </div>
 
-      <div class="form-group">
-        <label for="main_category">대분류 <span class="required">*</span></label>
-        <select name="main_category" id="main_cat" required>
-          <option value="">선택하세요</option>
-          {% for m in mains %}
-            <option value="{{ m }}">{{ m }}</option>
-          {% endfor %}
-        </select>
-        <div class="help-text">대분류도 자동으로 번역됩니다</div>
-      </div>
-
-      <div class="form-group">
-        <label for="sub_category">중분류 <span class="required">*</span></label>
-        <select name="sub_category" id="sub_cat" required>
-          <option value="">먼저 대분류를 선택하세요</option>
-        </select>
-        <div class="help-text">중분류도 자동으로 번역됩니다</div>
-      </div>
-
-      <div class="form-group">
-        <label for="sub_sub_category">소분류 <span class="required">*</span></label>
-        <select name="sub_sub_category" id="leaf_cat" required>
-          <option value="">먼저 중분류를 선택하세요</option>
-        </select>
-        <div class="help-text">소분류도 자동으로 번역됩니다</div>
-      </div>
-
-      <div class="form-group">
-        <label for="level">난이도 <span class="required">*</span></label>
-        <input type="text" id="level" name="level" required placeholder="예: 초급, 중급, 고급" />
-        <div class="help-text">난이도 정보도 다국어로 제공됩니다</div>
-      </div>
-
-      <div class="form-group">
-        <label for="tag">태그</label>
-        <input type="text" id="tag" name="tag" placeholder="예: 자격증 포함, 실습 위주 (선택사항)" />
-        <div class="help-text">태그는 검색 최적화에 도움이 됩니다</div>
-      </div>
-
-      <div class="file-input-group">
-        <label class="file-label">동영상 파일 <span class="required">*</span></label>
-        <div class="file-input-wrapper">
-          <label for="file" class="file-input-button">
-            📁 파일 선택 (MP4, AVI, MOV 등 모든 동영상 형식 지원)
-          </label>
-          <input type="file" id="file" name="file" accept="video/*" required />
+        <div class="form-group">
+          <label for="main_category">대분류 <span class="required">*</span></label>
+          <select name="main_category" id="main_cat" required>
+            <option value="">선택하세요</option>
+            {% for m in mains %}
+              <option value="{{ m }}">{{ m }}</option>
+            {% endfor %}
+          </select>
+          <div class="help-text">대분류도 자동으로 번역됩니다</div>
         </div>
-        <div class="selected-file" id="selectedVideo"></div>
-        <div class="help-text">최대 200MB까지 업로드 가능합니다</div>
-      </div>
 
-      <div class="file-input-group">
-        <label class="file-label">썸네일 이미지</label>
-        <div class="file-input-wrapper">
-          <label for="thumbnail" class="file-input-button">
-            🖼️ 썸네일 선택 (JPG, PNG 등 - 선택사항)
-          </label>
-          <input type="file" id="thumbnail" name="thumbnail" accept="image/*" />
+        <div class="form-group">
+          <label for="sub_category">중분류 <span class="required">*</span></label>
+          <select name="sub_category" id="sub_cat" required>
+            <option value="">먼저 대분류를 선택하세요</option>
+          </select>
+          <div class="help-text">중분류도 자동으로 번역됩니다</div>
         </div>
-        <div class="selected-file" id="selectedThumbnail"></div>
-        <div class="help-text">썸네일이 없으면 자동으로 QR 코드가 생성됩니다</div>
-      </div>
 
-      <button type="submit" id="submitBtn">
-        🚀 다국어 강의 업로드 시작
-      </button>
+        <div class="form-group">
+          <label for="sub_sub_category">소분류 <span class="required">*</span></label>
+          <select name="sub_sub_category" id="leaf_cat" required>
+            <option value="">먼저 중분류를 선택하세요</option>
+          </select>
+          <div class="help-text">소분류도 자동으로 번역됩니다</div>
+        </div>
 
-      <div class="progress-bar" id="progressBar">
-        <div class="progress-fill" id="progressFill"></div>
-      </div>
-      
-      <!-- 🆕 업로드 진행 상태 메시지 -->
-      <div id="uploadStatus" style="display: none; margin-top: 15px; text-align: center; color: #2a9d8f; font-weight: 500;">
-        <div id="statusMessage">업로드 중...</div>
-        <div id="translationStatus" style="font-size: 14px; color: #666; margin-top: 8px;">
-          번역 진행 상황이 여기에 표시됩니다
+        <div class="form-group">
+          <label for="level">난이도 <span class="required">*</span></label>
+          <input type="text" id="level" name="level" required placeholder="예: 초급, 중급, 고급" />
+          <div class="help-text">난이도 정보도 다국어로 제공됩니다</div>
+        </div>
+
+        <div class="form-group">
+          <label for="tag">태그</label>
+          <input type="text" id="tag" name="tag" placeholder="예: 자격증 포함, 실습 위주 (선택사항)" />
+          <div class="help-text">태그는 검색 최적화에 도움이 됩니다</div>
+        </div>
+
+        <div class="file-input-group">
+          <label class="file-label">동영상 파일 <span class="required">*</span></label>
+          <div class="file-input-wrapper">
+            <label for="file" class="file-input-button">
+              📁 파일 선택 (MP4, AVI, MOV 등 모든 동영상 형식 지원)
+            </label>
+            <input type="file" id="file" name="file" accept="video/*" required />
+          </div>
+          <div class="selected-file" id="selectedVideo"></div>
+          <div class="help-text">최대 200MB까지 업로드 가능합니다</div>
+        </div>
+
+        <div class="file-input-group">
+          <label class="file-label">썸네일 이미지</label>
+          <div class="file-input-wrapper">
+            <label for="thumbnail" class="file-input-button">
+              🖼️ 썸네일 선택 (JPG, PNG 등 - 선택사항)
+            </label>
+            <input type="file" id="thumbnail" name="thumbnail" accept="image/*" />
+          </div>
+          <div class="selected-file" id="selectedThumbnail"></div>
+          <div class="help-text">썸네일이 없으면 자동으로 QR 코드가 생성됩니다</div>
+        </div>
+
+        <button type="submit" id="submitBtn">
+          🚀 다국어 강의 업로드 시작
+        </button>
+
+        <div class="progress-bar" id="progressBar">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+        
+        <div id="uploadStatus" style="display: none; margin-top: 15px; text-align: center; color: #2a9d8f; font-weight: 500;">
+          <div id="statusMessage">업로드 중...</div>
+          <div id="translationStatus" style="font-size: 14px; color: #666; margin-top: 8px;">
+            번역 진행 상황이 여기에 표시됩니다
+          </div>
+        </div>
+      </form>
+    </div>
+
+    <!-- 🆕 언어별 영상 추가 탭 -->
+    <div id="language-video" class="tab-content">
+      <div class="language-video-section">
+        <h3>🌐 기존 강의에 언어별 영상 추가</h3>
+        <p style="text-align: center; color: #666; margin-bottom: 20px;">
+          이미 업로드한 강의에 다른 언어의 영상을 추가할 수 있습니다
+        </p>
+        
+        <!-- 기존 영상 목록 -->
+        <div class="existing-videos-list">
+          <h4 style="margin-top: 0;">📚 업로드된 강의 목록</h4>
+          <div id="videosList">
+            <p style="text-align: center; color: #999;">강의 목록을 불러오는 중...</p>
+          </div>
+        </div>
+
+        <!-- 언어별 영상 업로드 폼 -->
+        <div id="languageUploadForm" class="language-upload-form">
+          <h4 style="margin-top: 0; color: #007bff;">선택한 강의: <span id="selectedVideoTitle">-</span></h4>
+          
+          <form id="langVideoForm" enctype="multipart/form-data">
+            <input type="hidden" id="lang_group_id" name="group_id" />
+            
+            <div class="form-group">
+              <label for="language_code">언어 선택 <span class="required">*</span></label>
+              <select id="language_code" name="language_code" required>
+                <option value="">-- 언어를 선택하세요 --</option>
+                <option value="en">🇺🇸 English</option>
+                <option value="zh">🇨🇳 中文(简体)</option>
+                <option value="vi">🇻🇳 Tiếng Việt</option>
+                <option value="th">🇹🇭 ไทย</option>
+                <option value="ja">🇯🇵 日本語</option>
+              </select>
+              <div class="help-text">한국어 원본 외에 추가할 언어를 선택하세요</div>
+            </div>
+            
+            <div class="file-input-group">
+              <label class="file-label">번역된 동영상 파일 <span class="required">*</span></label>
+              <div class="file-input-wrapper">
+                <label for="lang_video_file" class="file-input-button">
+                  📁 언어별 영상 파일 선택
+                </label>
+                <input type="file" id="lang_video_file" name="file" accept="video/*" required />
+              </div>
+              <div class="selected-file" id="selectedLangVideo"></div>
+              <div class="help-text">⚠️ 원본 영상과 동일한 길이의 번역된 영상을 업로드하세요</div>
+            </div>
+            
+            <button type="submit" class="btn-language-upload" id="langUploadBtn">
+              🌐 언어별 영상 업로드
+            </button>
+          </form>
+          
+          <div id="langUploadStatus" style="margin-top: 20px;"></div>
         </div>
       </div>
-    </form>
+    </div>
   </div>
 
   <!-- 카테고리 데이터 -->
@@ -361,23 +566,21 @@
     const subSel  = document.getElementById('sub_cat');
     const leafSel = document.getElementById('leaf_cat');
 
-    // 🔧 기존 카테고리 로직 완전 유지
+    // 기존 카테고리 로직
     mainSel.addEventListener('change', () => {
       const mids = subs[mainSel.value] || [];
       subSel.innerHTML = '<option value="">선택하세요</option>'
         + mids.map(m => `<option value="${m}">${m}</option>`).join('');
-      // 소분류 초기화
       leafSel.innerHTML = '<option value="">먼저 중분류를 선택하세요</option>';
     });
 
-    // 중분류 변경 시
     subSel.addEventListener('change', () => {
       const lst = leafs[subSel.value] || [];
       leafSel.innerHTML = '<option value="">선택하세요</option>'
         + lst.map(l => `<option value="${l}">${l}</option>`).join('');
     });
 
-    // 🔧 기존 파일 선택 로직 완전 유지
+    // 파일 선택 로직
     document.getElementById('file').addEventListener('change', function(e) {
       const fileName = e.target.files[0]?.name || '';
       const fileSize = e.target.files[0]?.size || 0;
@@ -385,8 +588,7 @@
         const sizeMB = (fileSize / (1024 * 1024)).toFixed(2);
         document.getElementById('selectedVideo').textContent = `✅ 선택된 파일: ${fileName} (${sizeMB} MB)`;
         
-        // 🆕 파일 크기 검증 추가
-        if (fileSize > 200 * 1024 * 1024) { // 200MB 초과
+        if (fileSize > 200 * 1024 * 1024) {
           alert('⚠️ 파일 크기가 200MB를 초과합니다. 더 작은 파일을 선택해주세요.');
           e.target.value = '';
           document.getElementById('selectedVideo').textContent = '';
@@ -401,7 +603,17 @@
       }
     });
 
-    // 🆕 강화된 폼 제출 및 다국어 번역 상태 표시
+    // 언어별 영상 파일 선택
+    document.getElementById('lang_video_file').addEventListener('change', function(e) {
+      const fileName = e.target.files[0]?.name || '';
+      const fileSize = e.target.files[0]?.size || 0;
+      if (fileName) {
+        const sizeMB = (fileSize / (1024 * 1024)).toFixed(2);
+        document.getElementById('selectedLangVideo').textContent = `✅ 선택된 파일: ${fileName} (${sizeMB} MB)`;
+      }
+    });
+
+    // 폼 제출
     document.getElementById('uploadForm').addEventListener('submit', function(e) {
       const submitBtn = document.getElementById('submitBtn');
       const progressBar = document.getElementById('progressBar');
@@ -414,7 +626,6 @@
       progressBar.style.display = 'block';
       uploadStatus.style.display = 'block';
       
-      // 🆕 업로드 단계별 메시지
       const uploadStages = [
         { progress: 10, status: '📁 파일 검증 중...', translation: '파일 형식과 크기를 확인하고 있습니다' },
         { progress: 25, status: '☁️ 클라우드 업로드 중...', translation: '안전한 클라우드 저장소로 업로드하고 있습니다' },
@@ -435,83 +646,190 @@
           currentStage++;
         } else {
           clearInterval(stageInterval);
-          // 완료 시 100%로 설정하고 메시지 업데이트
           document.getElementById('progressFill').style.width = '100%';
           statusMessage.textContent = '🎉 업로드 완료! 번역 작업은 백그라운드에서 계속됩니다';
           translationStatus.textContent = '잠시 후 성공 페이지로 이동합니다...';
         }
-      }, 800); // 각 단계를 0.8초마다 진행
+      }, 800);
+    });
 
-      // 🆕 실제 업로드 시간 예측 (파일 크기 기반)
-      const fileInput = document.getElementById('file');
-      if (fileInput.files[0]) {
-        const fileSizeMB = fileInput.files[0].size / (1024 * 1024);
-        const estimatedSeconds = Math.max(5, Math.min(30, Math.ceil(fileSizeMB / 10))); // 5-30초 범위
+    // 🆕 탭 전환 함수
+    function switchTab(tabName) {
+      // 모든 탭과 컨텐츠 비활성화
+      document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+      
+      // 선택한 탭 활성화
+      event.target.classList.add('active');
+      document.getElementById(tabName).classList.add('active');
+      
+      // 언어별 영상 탭을 선택했을 때 영상 목록 로드
+      if (tabName === 'language-video') {
+        loadExistingVideos();
+      }
+    }
+
+    // 🆕 JWT 토큰 가져오기 (세션 쿠키 사용)
+    function getAuthToken() {
+      // Flask 세션을 사용하므로 별도 토큰 불필요
+      return '';
+    }
+
+    // 🆕 기존 영상 목록 로드
+    async function loadExistingVideos() {
+      const videosList = document.getElementById('videosList');
+      
+      try {
+        // Firestore에서 직접 영상 목록 가져오기 (간단한 구현)
+        // 실제로는 백엔드 API를 통해 가져와야 함
+        videosList.innerHTML = '<p style="text-align: center; color: #666;">영상 목록을 불러오려면 관리자 API가 필요합니다.</p>';
         
-        setTimeout(() => {
-          // 예상 시간 후 메시지 업데이트
-          if (statusMessage.textContent.includes('업로드 완료')) {
-            translationStatus.innerHTML = `
-              <strong>✨ 업로드 성공!</strong><br>
-              📊 즉시 번역 완료: 한국어, 영어<br>
-              🔄 백그라운드 번역 진행 중: 중국어, 베트남어, 태국어, 일본어<br>
-              ⏱️ 모든 번역 완료 예상 시간: 약 2-3분
-            `;
+        // 임시 데이터 (테스트용)
+        const mockVideos = [
+          { 
+            id: 'test123', 
+            title: '기초 용접 안전교육', 
+            date: '2024-01-15',
+            languages: { ko: true, en: true, zh: false, vi: false, th: false, ja: false }
+          },
+          { 
+            id: 'test456', 
+            title: '크레인 운전 실습', 
+            date: '2024-01-10',
+            languages: { ko: true, en: false, zh: false, vi: false, th: false, ja: false }
           }
-        }, estimatedSeconds * 1000);
+        ];
+        
+        renderVideosList(mockVideos);
+      } catch (error) {
+        console.error('영상 목록 로드 실패:', error);
+        videosList.innerHTML = '<p style="text-align: center; color: #e74c3c;">영상 목록을 불러올 수 없습니다.</p>';
+      }
+    }
+
+    // 🆕 영상 목록 렌더링
+    function renderVideosList(videos) {
+      const videosList = document.getElementById('videosList');
+      
+      if (videos.length === 0) {
+        videosList.innerHTML = '<p style="text-align: center; color: #999;">업로드된 영상이 없습니다.</p>';
+        return;
+      }
+      
+      videosList.innerHTML = videos.map(video => `
+        <div class="video-item" onclick="selectVideo('${video.id}', '${video.title}')">
+          <div class="video-item-title">${video.title}</div>
+          <div class="video-item-info">업로드: ${video.date} | ID: ${video.id}</div>
+          <div class="language-status">
+            ${Object.entries(video.languages).map(([lang, hasVideo]) => `
+              <span class="lang-badge ${hasVideo ? 'has-video' : 'no-video'}">
+                ${_getLanguageFlag(lang)} ${lang.toUpperCase()}
+              </span>
+            `).join('')}
+          </div>
+        </div>
+      `).join('');
+    }
+
+    // 🆕 언어별 국기 아이콘
+    function _getLanguageFlag(lang) {
+      const flags = {
+        ko: '🇰🇷', en: '🇺🇸', zh: '🇨🇳', vi: '🇻🇳', th: '🇹🇭', ja: '🇯🇵'
+      };
+      return flags[lang] || '🌐';
+    }
+
+    // 🆕 영상 선택
+    function selectVideo(videoId, videoTitle) {
+      // 이전 선택 해제
+      document.querySelectorAll('.video-item').forEach(item => {
+        item.classList.remove('selected');
+      });
+      
+      // 현재 선택 표시
+      event.currentTarget.classList.add('selected');
+      
+      // 폼 표시 및 정보 설정
+      document.getElementById('languageUploadForm').classList.add('active');
+      document.getElementById('lang_group_id').value = videoId;
+      document.getElementById('selectedVideoTitle').textContent = videoTitle;
+    }
+
+    // 🆕 언어별 영상 업로드
+    document.getElementById('langVideoForm').addEventListener('submit', async function(e) {
+      e.preventDefault();
+      
+      const formData = new FormData(e.target);
+      const langUploadBtn = document.getElementById('langUploadBtn');
+      const langUploadStatus = document.getElementById('langUploadStatus');
+      
+      langUploadBtn.disabled = true;
+      langUploadBtn.textContent = '⏳ 업로드 중...';
+      langUploadStatus.innerHTML = '<div style="color: #007bff;">📤 언어별 영상을 업로드하고 있습니다...</div>';
+      
+      try {
+        const response = await fetch('/api/admin/upload_language_video', {
+          method: 'POST',
+          body: formData,
+          credentials: 'same-origin' // 세션 쿠키 포함
+        });
+        
+        const result = await response.json();
+        
+        if (response.ok) {
+          langUploadStatus.innerHTML = `
+            <div style="color: #28a745; font-weight: 600;">
+              ✅ 업로드 완료!<br>
+              ${_getLanguageFlag(formData.get('language_code'))} 
+              ${_languageNames[formData.get('language_code')]} 영상이 성공적으로 업로드되었습니다.
+            </div>
+          `;
+          
+          // 폼 초기화
+          e.target.reset();
+          document.getElementById('selectedLangVideo').textContent = '';
+          
+          // 영상 목록 새로고침
+          setTimeout(() => loadExistingVideos(), 1000);
+        } else {
+          langUploadStatus.innerHTML = `
+            <div style="color: #dc3545;">
+              ❌ 업로드 실패: ${result.error || '알 수 없는 오류'}
+            </div>
+          `;
+        }
+      } catch (error) {
+        langUploadStatus.innerHTML = `
+          <div style="color: #dc3545;">
+            ❌ 오류: ${error.message}
+          </div>
+        `;
+      } finally {
+        langUploadBtn.disabled = false;
+        langUploadBtn.textContent = '🌐 언어별 영상 업로드';
       }
     });
 
-    // 🆕 페이지 로드 시 다국어 기능 안내
+    // 🆕 언어 이름 매핑
+    const _languageNames = {
+      en: 'English',
+      zh: '中文(简体)',
+      vi: 'Tiếng Việt',
+      th: 'ไทย',
+      ja: '日本語'
+    };
+
+    // 페이지 로드 시 실행
     document.addEventListener('DOMContentLoaded', function() {
-      console.log('🌍 다국어 강의 업로드 시스템 v2.3.0');
+      console.log('🌍 다국어 강의 업로드 시스템 v2.4.0');
       console.log('📋 ISO/IEC 25023/25051/25041 표준 준수');
       console.log('🚀 지원 언어: 한국어, 영어, 중국어, 베트남어, 태국어, 일본어');
-      
-      // 🆕 폼 유효성 검사 강화
-      const form = document.getElementById('uploadForm');
-      const inputs = form.querySelectorAll('input[required], select[required]');
-      
-      inputs.forEach(input => {
-        input.addEventListener('invalid', function(e) {
-          e.preventDefault();
-          this.style.borderColor = '#e74c3c';
-          
-          // 커스텀 에러 메시지
-          let errorMsg = '이 필드는 필수입니다.';
-          if (this.type === 'file') {
-            errorMsg = '동영상 파일을 선택해주세요.';
-          }
-          
-          // 기존 에러 메시지 제거
-          const existingError = this.parentNode.querySelector('.error-message');
-          if (existingError) {
-            existingError.remove();
-          }
-          
-          // 새 에러 메시지 추가
-          const errorDiv = document.createElement('div');
-          errorDiv.className = 'error-message';
-          errorDiv.style.color = '#e74c3c';
-          errorDiv.style.fontSize = '14px';
-          errorDiv.style.marginTop = '5px';
-          errorDiv.textContent = errorMsg;
-          this.parentNode.appendChild(errorDiv);
-        });
-        
-        input.addEventListener('input', function() {
-          this.style.borderColor = '';
-          const errorMsg = this.parentNode.querySelector('.error-message');
-          if (errorMsg) {
-            errorMsg.remove();
-          }
-        });
-      });
+      console.log('🎬 언어별 영상 업로드 지원');
     });
   </script>
 
   <style>
-    /* 🆕 에러 메시지 스타일링 */
+    /* 에러 메시지 스타일링 */
     .error-message {
       color: #e74c3c !important;
       font-size: 14px !important;
@@ -519,7 +837,7 @@
       font-weight: 500 !important;
     }
     
-    /* 🆕 반응형 디자인 개선 */
+    /* 반응형 디자인 */
     @media (max-width: 768px) {
       .upload-container {
         padding: 20px;
@@ -535,37 +853,15 @@
         padding: 3px 6px;
       }
       
-      .multilingual-info h3 {
-        font-size: 16px;
+      .tabs {
+        flex-wrap: wrap;
       }
       
-      .multilingual-info p {
-        font-size: 13px;
-      }
-    }
-    
-    /* 🆕 다크 모드 지원 준비 */
-    @media (prefers-color-scheme: dark) {
-      body {
-        background-color: #1a1a1a;
-        color: #ffffff;
-      }
-      
-      .upload-container {
-        background: #2d2d2d;
-        color: #ffffff;
-      }
-      
-      input, select {
-        background-color: #3d3d3d;
-        color: #ffffff;
-        border-color: #555;
-      }
-      
-      .file-input-button {
-        background-color: #3d3d3d;
-        color: #ffffff;
-        border-color: #555;
+      .tab {
+        flex: 1;
+        min-width: 150px;
+        font-size: 14px;
+        padding: 10px;
       }
     }
   </style>
