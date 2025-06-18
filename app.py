@@ -217,7 +217,7 @@ def create_jwt_for_admin():
     """관리자 로그인 시 JWT 발급"""
     now = datetime.utcnow()
     payload = {
-        'sub': ADMIN_EMAIL,
+        'sub': 'admin',
         'iat': now,
         'exp': now + timedelta(hours=JWT_EXPIRES_HOURS),
         'type': 'admin_token'
@@ -229,7 +229,7 @@ def verify_jwt_token(token: str) -> bool:
     """JWT 토큰 검증"""
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return payload.get('sub') == ADMIN_EMAIL and payload.get('type') == 'admin_token'
+        return payload.get('sub') == 'admin' and payload.get('type') == 'admin_token'
     except jwt.ExpiredSignatureError:
         app.logger.warning("JWT 토큰 만료")
         return False
@@ -739,18 +739,17 @@ def login():
     """관리자 로그인 - 세션 설정 강화"""
     try:
         pw = request.form.get('password', '')
-        email = request.form.get('email', ADMIN_EMAIL)  # 이메일이 없으면 기본값 사용
 
-        app.logger.info(f"로그인 시도: email={email}")
+        app.logger.info(f"로그인 시도")
 
-        if email == ADMIN_EMAIL and pw == ADMIN_PASSWORD:
+        if pw == ADMIN_PASSWORD:
             # 세션 설정 강화
             session.permanent = True
             session['logged_in'] = True
-            session['admin_email'] = email
+            session['admin_email'] = ADMIN_EMAIL
             session['login_time'] = datetime.utcnow().isoformat()
             
-            app.logger.info(f"✅ 로그인 성공: {email}")
+            app.logger.info(f"✅ 로그인 성공")
             
             # 응답에 추가 보안 설정
             response = make_response(redirect(url_for('upload_form')))
@@ -768,7 +767,7 @@ def login():
             
             return response
         else:
-            app.logger.warning(f"❌ 로그인 실패: {email}")
+            app.logger.warning(f"❌ 로그인 실패")
             return render_template('login.html', error="인증 실패")
             
     except Exception as e:
@@ -780,30 +779,29 @@ def api_admin_login():
     """Flutter 관리자 로그인"""
     try:
         data = request.get_json() or {}
-        email = data.get('email', '').strip()
         password = data.get('password', '')
 
-        app.logger.info(f"API 로그인 시도: {email}")
+        app.logger.info(f"API 로그인 시도")
 
-        if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
+        if password == ADMIN_PASSWORD:
             token = create_jwt_for_admin()
             
             # 세션도 함께 설정 (혼용 가능하도록)
             session.permanent = True
             session['logged_in'] = True
-            session['admin_email'] = email
+            session['admin_email'] = ADMIN_EMAIL
             session['api_login_time'] = datetime.utcnow().isoformat()
             
-            app.logger.info(f"✅ API 로그인 성공: {email}")
+            app.logger.info(f"✅ API 로그인 성공")
             
             return jsonify({
                 'token': token, 
                 'success': True,
                 'expires_in': JWT_EXPIRES_HOURS * 3600,
-                'user': {'email': email}
+                'user': {'email': ADMIN_EMAIL}
             }), 200
         else:
-            app.logger.warning(f"❌ API 로그인 실패: {email}")
+            app.logger.warning(f"❌ API 로그인 실패")
             return jsonify({'error': '관리자 인증 실패', 'success': False}), 401
             
     except Exception as e:
@@ -1605,7 +1603,7 @@ def check_admin_auth():
         token = auth_header.split(' ', 1)[1]
         try:
             payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-            token_auth = payload.get('sub') == ADMIN_EMAIL
+            token_auth = payload.get('sub') == 'admin'
             token_email = payload.get('sub', '')
         except:
             token_auth = False

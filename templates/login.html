@@ -140,13 +140,20 @@
             letter-spacing: 0.5px;
         }
 
-        .login-button:hover {
+        .login-button:hover:not(:disabled) {
             transform: translateY(-2px);
             box-shadow: 0 10px 25px rgba(102, 126, 234, 0.3);
         }
 
         .login-button:active {
             transform: translateY(0);
+        }
+
+        .login-button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
         }
 
         .security-note {
@@ -169,6 +176,46 @@
             font-size: 24px;
         }
 
+        /* 🆕 연결 상태 표시 */
+        .connection-status {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 8px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            z-index: 1000;
+        }
+
+        .connection-status.connected {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .connection-status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
         @media (max-width: 480px) {
             .login-container {
                 padding: 30px 20px;
@@ -178,6 +225,11 @@
     </style>
 </head>
 <body>
+    <!-- 🆕 연결 상태 표시 -->
+    <div id="connectionStatus" class="connection-status disconnected">
+        🔄 서버 연결 확인 중...
+    </div>
+
     <div class="login-container">
         <div class="login-header">
             <div class="admin-icon">🔐</div>
@@ -185,7 +237,7 @@
             <p>비밀번호를 입력하세요</p>
         </div>
 
-        <form method="post" action="/login">
+        <form method="post" action="/login" id="loginForm">
             {% if error %}
             <div class="error-message">
                 {{ error }}
@@ -209,19 +261,50 @@
                 </div>
             </div>
 
-            <button type="submit" class="login-button">
+            <button type="submit" class="login-button" id="loginBtn">
                 입장
             </button>
         </form>
 
         <div class="security-note">
-            🔒 보안 연결로 보호됩니다
+            🔒 보안 연결로 보호됩니다 | 🚂 Railway 호스팅
         </div>
     </div>
 
     <script>
+        // 🆕 서버 연결 상태 확인
+        async function checkServerConnection() {
+            const statusEl = document.getElementById('connectionStatus');
+            
+            try {
+                const response = await fetch('/health', { 
+                    method: 'GET',
+                    cache: 'no-cache',
+                    timeout: 5000
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    statusEl.textContent = `✅ 서버 연결됨 (v${data.version || '2.5.1'})`;
+                    statusEl.className = 'connection-status connected';
+                    
+                    // 3초 후 자동 숨김
+                    setTimeout(() => {
+                        statusEl.style.opacity = '0';
+                        setTimeout(() => statusEl.style.display = 'none', 300);
+                    }, 3000);
+                } else {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+            } catch (error) {
+                console.error('서버 연결 확인 실패:', error);
+                statusEl.textContent = `❌ 서버 연결 실패`;
+                statusEl.className = 'connection-status disconnected';
+            }
+        }
+
         function togglePassword() {
-            const passwordInput = document.querySelector('input[name="password"]');
+            const passwordInput = document.getElementById('password');
             const toggleButton = document.querySelector('.password-toggle');
             
             if (passwordInput.type === 'password') {
@@ -234,23 +317,63 @@
         }
 
         // 폼 제출 시 버튼 로딩 효과
-        document.querySelector('form').addEventListener('submit', function(e) {
-            const button = document.querySelector('.login-button');
-            button.textContent = '인증 중...';
+        document.getElementById('loginForm').addEventListener('submit', function(e) {
+            const button = document.getElementById('loginBtn');
+            button.innerHTML = '<span class="loading-spinner"></span>인증 중...';
             button.disabled = true;
+            
+            // 타임아웃 설정 (10초 후 복구)
+            setTimeout(() => {
+                if (button.disabled) {
+                    button.textContent = '입장';
+                    button.disabled = false;
+                }
+            }, 10000);
         });
 
-        // 페이지 로드 시 애니메이션
+        // 🆕 자동 완성 개선
         document.addEventListener('DOMContentLoaded', function() {
             const container = document.querySelector('.login-container');
             container.style.opacity = '0';
             container.style.transform = 'translateY(20px)';
+            
+            // 서버 연결 상태 확인
+            checkServerConnection();
             
             setTimeout(() => {
                 container.style.transition = 'all 0.6s ease';
                 container.style.opacity = '1';
                 container.style.transform = 'translateY(0)';
             }, 100);
+
+            // 🆕 세션 상태 확인 (이미 로그인된 경우)
+            fetch('/api/admin/check_auth', {
+                method: 'GET',
+                credentials: 'same-origin'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.authenticated) {
+                    console.log('이미 로그인된 상태 감지');
+                    // 잠시 메시지 표시 후 리다이렉트
+                    const statusEl = document.getElementById('connectionStatus');
+                    statusEl.textContent = '✅ 이미 로그인됨 - 리다이렉트 중...';
+                    statusEl.className = 'connection-status connected';
+                    
+                    setTimeout(() => {
+                        window.location.href = '/upload_form';
+                    }, 1500);
+                }
+            })
+            .catch(console.error);
+        });
+
+        // 🆕 엔터 키 처리 개선
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') {
+                e.preventDefault();
+                document.getElementById('loginForm').requestSubmit();
+            }
         });
     </script>
 </body>
