@@ -773,7 +773,7 @@ def api_admin_login():
 @app.route('/api/admin/videos', methods=['GET'])
 @admin_required
 def api_get_videos():
-    """업로드된 영상 목록 조회 API"""
+    """업로드된 영상 목록 조회 API - 언어별 동영상 지원 확인 강화"""
     try:
         uploads_ref = db.collection('uploads')
         docs = uploads_ref.stream()
@@ -783,9 +783,27 @@ def api_get_videos():
             data = doc.to_dict()
             
             # 각 영상의 언어별 지원 현황 확인
-            languages = {'ko': True}  # 한국어는 기본적으로 있음
+            languages = {'ko': True}  # 한국어는 기본적으로 있음 (원본)
+            video_languages = {'ko': True}  # 실제 동영상 파일 존재 여부
             
-            # 번역 컬렉션에서 언어별 지원 확인
+            # 🆕 언어별 동영상 파일 실제 존재 확인
+            try:
+                lang_videos_ref = doc.reference.collection('language_videos')
+                lang_video_docs = lang_videos_ref.stream()
+                
+                for lang_video_doc in lang_video_docs:
+                    lang_code = lang_video_doc.id
+                    if lang_code in SUPPORTED_LANGUAGES:
+                        lang_data = lang_video_doc.to_dict()
+                        # 동영상 키가 존재하고 URL이 유효한지 확인
+                        if lang_data.get('video_key') and lang_data.get('presigned_url'):
+                            video_languages[lang_code] = True
+                            app.logger.debug(f"언어별 동영상 확인: {doc.id} - {lang_code}")
+                        
+            except Exception as e:
+                app.logger.warning(f"언어별 동영상 확인 실패 ({doc.id}): {e}")
+            
+            # 번역 정보 확인 (메타데이터용)
             try:
                 translations_ref = doc.reference.collection('translations')
                 translation_docs = translations_ref.stream()
@@ -797,9 +815,6 @@ def api_get_videos():
             except Exception as e:
                 app.logger.warning(f"번역 정보 조회 실패 ({doc.id}): {e}")
             
-            # 언어별 동영상 파일 지원 확인 (향후 확장)
-            # TODO: 언어별 별도 동영상 파일이 있는지 확인하는 로직 추가
-            
             video_info = {
                 'group_id': data.get('group_id', doc.id),
                 'title': data.get('group_name', '제목 없음'),
@@ -810,7 +825,8 @@ def api_get_videos():
                 'time': data.get('time', '0:00'),
                 'level': data.get('level', ''),
                 'tag': data.get('tag', ''),
-                'languages': languages,
+                'languages': video_languages,  # 🆕 실제 동영상 파일 기준으로 변경
+                'translations': languages,     # 🆕 번역 정보 별도 제공
                 'translation_status': data.get('translation_status', 'unknown'),
                 'created_at': data.get('created_at', ''),
                 'updated_at': data.get('updated_at', '')

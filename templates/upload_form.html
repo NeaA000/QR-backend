@@ -395,6 +395,24 @@
       color: #0c5460;
       border: 1px solid #bee5eb;
     }
+
+    /* 🆕 실시간 상태 표시 */
+    .video-status-indicator {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 5px;
+    }
+    .video-status-indicator.complete {
+      background: #28a745;
+    }
+    .video-status-indicator.partial {
+      background: #ffc107;
+    }
+    .video-status-indicator.none {
+      background: #dc3545;
+    }
   </style>
 </head>
 <body>
@@ -715,60 +733,16 @@
       }
     }
 
-    // 🆕 관리자 인증 확인 및 토큰 획득
-    async function ensureAdminAuth() {
-      if (currentAdminToken) {
-        return currentAdminToken;
-      }
-
-      // Flask 세션 기반 로그인 상태 확인
-      try {
-        const response = await fetch('/api/admin/videos', {
-          method: 'GET',
-          credentials: 'same-origin' // 세션 쿠키 포함
-        });
-
-        if (response.ok) {
-          // 세션이 유효하면 임시 토큰 발급 요청
-          const loginResponse = await fetch('/api/admin/login', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              email: 'admin@example.com', // 이미 로그인된 상태이므로 세션에서 확인
-              password: 'session_validated'
-            }),
-            credentials: 'same-origin'
-          });
-
-          if (loginResponse.ok) {
-            const data = await loginResponse.json();
-            currentAdminToken = data.token;
-            return currentAdminToken;
-          }
-        }
-        
-        throw new Error('세션 만료');
-      } catch (error) {
-        console.error('인증 확인 실패:', error);
-        alert('관리자 인증이 필요합니다. 다시 로그인해주세요.');
-        window.location.href = '/';
-        return null;
-      }
-    }
-
-    // 🆕 백엔드에서 영상 목록 가져오기
+    // 🆕 백엔드에서 영상 목록 가져오기 - 수정된 버전
     async function loadExistingVideos() {
       const videosList = document.getElementById('videosList');
       
       try {
         videosList.innerHTML = '<div class="loading-spinner"></div> 영상 목록을 불러오는 중...';
 
-        // 새로운 백엔드 API 엔드포인트 호출
         const response = await fetch('/api/admin/videos', {
           method: 'GET',
-          credentials: 'same-origin', // 세션 쿠키 포함
+          credentials: 'same-origin',
           headers: {
             'Content-Type': 'application/json'
           }
@@ -780,6 +754,8 @@
 
         const result = await response.json();
         cachedVideos = result.videos || [];
+        
+        console.log('📊 로드된 영상 데이터:', cachedVideos); // 🆕 디버깅용
         
         renderVideosList(cachedVideos);
         
@@ -794,7 +770,7 @@
       }
     }
 
-    // 🆕 영상 목록 렌더링
+    // 🆕 영상 목록 렌더링 - 개선된 버전
     function renderVideosList(videos) {
       const videosList = document.getElementById('videosList');
       
@@ -803,22 +779,55 @@
         return;
       }
       
-      videosList.innerHTML = videos.map(video => `
-        <div class="video-item" onclick="selectVideo('${video.group_id}', '${video.title}', ${JSON.stringify(video.languages).replace(/"/g, '&quot;')})">
-          <div class="video-item-title">${video.title}</div>
-          <div class="video-item-info">
-            업로드: ${video.upload_date || 'N/A'} | 
-            카테고리: ${video.main_category} > ${video.sub_category} > ${video.sub_sub_category}
+      videosList.innerHTML = videos.map(video => {
+        // 🆕 실제 동영상 파일 기준으로 상태 표시
+        const videoLanguages = video.languages || { ko: true };
+        const translationLanguages = video.translations || { ko: true };
+        
+        console.log(`📹 ${video.title} - 동영상:`, videoLanguages, '번역:', translationLanguages); // 🆕 디버깅
+        
+        return `
+          <div class="video-item" onclick="selectVideo('${video.group_id}', '${video.title.replace(/'/g, "\\'")}', ${JSON.stringify(videoLanguages).replace(/"/g, '&quot;')})">
+            <div class="video-item-title">
+              <span class="video-status-indicator ${getVideoStatusIndicator(videoLanguages)}"></span>
+              ${video.title}
+            </div>
+            <div class="video-item-info">
+              업로드: ${video.upload_date || 'N/A'} | 
+              카테고리: ${video.main_category} > ${video.sub_category} > ${video.sub_sub_category}
+            </div>
+            <div class="language-status">
+              ${Object.entries(_getAllLanguages()).map(([lang, name]) => {
+                const hasVideo = videoLanguages[lang] || false;
+                const hasTranslation = translationLanguages[lang] || false;
+                return `
+                  <span class="lang-badge ${hasVideo ? 'has-video' : 'no-video'}" title="${hasVideo ? '동영상 있음' : '동영상 없음'} / ${hasTranslation ? '번역 있음' : '번역 없음'}">
+                    ${_getLanguageFlag(lang)} ${lang.toUpperCase()}
+                    ${hasVideo ? '🎬' : '📝'}
+                  </span>
+                `;
+              }).join('')}
+            </div>
           </div>
-          <div class="language-status">
-            ${Object.entries(video.languages || {ko: true}).map(([lang, hasVideo]) => `
-              <span class="lang-badge ${hasVideo ? 'has-video' : 'no-video'}">
-                ${_getLanguageFlag(lang)} ${lang.toUpperCase()}
-              </span>
-            `).join('')}
-          </div>
-        </div>
-      `).join('');
+        `;
+      }).join('');
+    }
+
+    // 🆕 동영상 상태 표시기
+    function getVideoStatusIndicator(languages) {
+      const total = Object.keys(_getAllLanguages()).length;
+      const hasVideo = Object.values(languages).filter(Boolean).length;
+      
+      if (hasVideo === total) return 'complete';
+      if (hasVideo > 1) return 'partial';
+      return 'none';
+    }
+
+    // 🆕 모든 지원 언어 정보
+    function _getAllLanguages() {
+      return {
+        ko: '한국어', en: 'English', zh: '中文', vi: 'Tiếng Việt', th: 'ไทย', ja: '日本語'
+      };
     }
 
     // 🆕 언어별 국기 아이콘
@@ -829,8 +838,10 @@
       return flags[lang] || '🌐';
     }
 
-    // 🆕 영상 선택
+    // 🆕 영상 선택 - 수정된 버전
     function selectVideo(videoId, videoTitle, languages = {}) {
+      console.log('🎯 선택된 영상:', videoId, videoTitle, languages); // 🆕 디버깅
+      
       // 이전 선택 해제
       document.querySelectorAll('.video-item').forEach(item => {
         item.classList.remove('selected');
@@ -844,7 +855,7 @@
       document.getElementById('lang_group_id').value = videoId;
       document.getElementById('selectedVideoTitle').textContent = videoTitle;
 
-      // 이미 업로드된 언어들은 선택에서 제외
+      // 🆕 이미 업로드된 언어들은 선택에서 제외 (실제 동영상 파일 기준)
       const languageSelect = document.getElementById('language_code');
       const options = languageSelect.querySelectorAll('option');
       
@@ -852,50 +863,63 @@
         const langCode = option.value;
         if (langCode && languages[langCode]) {
           option.disabled = true;
-          option.textContent = option.textContent + ' (이미 업로드됨)';
+          option.style.color = '#999';
+          option.textContent = option.textContent.replace(' (이미 업로드됨)', '') + ' (이미 업로드됨)';
         } else {
           option.disabled = false;
+          option.style.color = '';
           option.textContent = option.textContent.replace(' (이미 업로드됨)', '');
         }
       });
+
+      // 🆕 선택 가능한 언어가 있는지 확인
+      const availableLanguages = Array.from(options).filter(option => option.value && !option.disabled);
+      if (availableLanguages.length === 0) {
+        document.getElementById('langUploadStatus').innerHTML = `
+          <div class="message info">
+            ✅ 이 강의는 모든 언어의 동영상이 업로드되었습니다!
+          </div>
+        `;
+      } else {
+        document.getElementById('langUploadStatus').innerHTML = '';
+      }
     }
 
-    // 🆕 언어별 영상 업로드
+    // 🆕 언어별 영상 업로드 - 개선된 버전
     document.getElementById('langVideoForm').addEventListener('submit', async function(e) {
       e.preventDefault();
       
       const formData = new FormData(e.target);
       const langUploadBtn = document.getElementById('langUploadBtn');
       const langUploadStatus = document.getElementById('langUploadStatus');
+      const selectedLang = formData.get('language_code');
+      
+      console.log('🚀 언어별 영상 업로드 시작:', {
+        groupId: formData.get('group_id'),
+        language: selectedLang,
+        fileSize: formData.get('file')?.size
+      });
       
       langUploadBtn.disabled = true;
       langUploadBtn.innerHTML = '<div class="loading-spinner"></div>업로드 중...';
       langUploadStatus.innerHTML = '<div class="message info">📤 언어별 영상을 업로드하고 있습니다...</div>';
       
       try {
-        // 관리자 인증 토큰 확인
-        const token = await ensureAdminAuth();
-        if (!token) {
-          throw new Error('관리자 인증 실패');
-        }
-
         const response = await fetch('/api/admin/upload_language_video', {
           method: 'POST',
           body: formData,
-          credentials: 'same-origin', // 세션 쿠키 포함
-          headers: {
-            'Authorization': `Bearer ${token}`
-          }
+          credentials: 'same-origin'
         });
         
         const result = await response.json();
+        console.log('📤 업로드 응답:', result);
         
         if (response.ok) {
           langUploadStatus.innerHTML = `
             <div class="message success">
               ✅ 업로드 완료!<br>
-              ${_getLanguageFlag(formData.get('language_code'))} 
-              ${_languageNames[formData.get('language_code')]} 영상이 성공적으로 업로드되었습니다.
+              ${_getLanguageFlag(selectedLang)} 
+              ${_getLanguageNames()[selectedLang]} 영상이 성공적으로 업로드되었습니다.
             </div>
           `;
           
@@ -903,11 +927,11 @@
           e.target.reset();
           document.getElementById('selectedLangVideo').textContent = '';
           
-          // 영상 목록 새로고침 (3초 후)
+          // 🆕 영상 목록 즉시 새로고침
           setTimeout(() => {
             loadExistingVideos();
             langUploadStatus.innerHTML = '';
-          }, 3000);
+          }, 2000);
           
         } else {
           langUploadStatus.innerHTML = `
@@ -930,23 +954,20 @@
     });
 
     // 🆕 언어 이름 매핑
-    const _languageNames = {
+    const _getLanguageNames = () => ({
       en: 'English',
       zh: '中文(简体)',
       vi: 'Tiếng Việt',
       th: 'ไทย',
       ja: '日本語'
-    };
+    });
 
     // 페이지 로드 시 실행
     document.addEventListener('DOMContentLoaded', function() {
-      console.log('🌍 다국어 강의 업로드 시스템 v2.5.0');
+      console.log('🌍 다국어 강의 업로드 시스템 v2.5.1');
       console.log('📋 ISO/IEC 25023/25051/25041 표준 준수');
       console.log('🚀 지원 언어: 한국어, 영어, 중국어, 베트남어, 태국어, 일본어');
-      console.log('🎬 언어별 영상 업로드 완전 구현');
-      
-      // 초기 관리자 인증 확인
-      ensureAdminAuth().catch(console.error);
+      console.log('🎬 언어별 영상 업로드 완전 구현 및 문제 해결');
     });
   </script>
 
