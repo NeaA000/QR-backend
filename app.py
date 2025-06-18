@@ -1,4 +1,4 @@
-# backend/app.py - 구글 플레이스토어 보안정책 준수 및 성능 최적화 버전
+# backend/app.py - 구글 플레이스토어 보안정책 준수 및 언어별 영상 지원 강화
 
 import os
 import uuid
@@ -702,7 +702,7 @@ def start_background_scheduler():
         app.logger.error(f"❌ 스케줄러 시작 실패: {e}")
 
 # ===================================================================
-# 🆕 메인 라우팅 및 API 엔드포인트들 (누락된 API들 추가)
+# 🆕 메인 라우팅 및 API 엔드포인트들 (언어별 영상 지원 강화)
 # ===================================================================
 
 @app.route('/', methods=['GET'])
@@ -732,8 +732,6 @@ def logout():
     """로그아웃"""
     session.clear()
     return redirect(url_for('login_page'))
-
-# 🆕 누락된 API 엔드포인트들 추가
 
 @app.route('/api/admin/check_auth', methods=['GET'])
 def api_check_auth():
@@ -1156,9 +1154,13 @@ def upload_video():
         thumbnail_url=thumbnail_presigned_url
     )
 
+# ===================================================================
+# 🆕 언어별 영상 지원 강화된 /watch 엔드포인트
+# ===================================================================
+
 @app.route('/watch/<group_id>', methods=['GET'])
 def watch(group_id):
-    """동영상 시청 페이지"""
+    """동영상 시청 페이지 - 언어별 영상 지원 강화"""
     try:
         requested_lang = request.args.get('lang', 'ko')
         
@@ -1175,7 +1177,7 @@ def watch(group_id):
             else:
                 abort(404)
         
-        # URL 갱신
+        # 기본 한국어 영상 URL 갱신
         current_presigned = video_data.get('presigned_url', '')
         if not current_presigned or is_presigned_url_expired(current_presigned, 60):
             new_presigned_url = generate_presigned_url(video_data['video_key'], expires_in=604800)
@@ -1185,36 +1187,75 @@ def watch(group_id):
             })
             video_data['presigned_url'] = new_presigned_url
 
-        # 🆕 언어별 동영상 확인
+        # 🆕 언어별 동영상 확인 및 URL 반환 로직 강화
         video_url = video_data['presigned_url']  # 기본값 (한국어)
+        has_language_video = False
+        actual_language = 'ko'  # 실제 재생될 언어
+        language_video_info = {}
         
         if requested_lang != 'ko':
             try:
+                # 언어별 동영상 문서 확인
                 lang_video_doc = db.collection('uploads').document(group_id) \
                                   .collection('language_videos').document(requested_lang).get()
                 
                 if lang_video_doc.exists:
                     lang_video_data = lang_video_doc.to_dict()
+                    lang_video_key = lang_video_data.get('video_key', '')
                     lang_presigned_url = lang_video_data.get('presigned_url', '')
                     
-                    # 언어별 URL 만료 확인
-                    if lang_presigned_url and not is_presigned_url_expired(lang_presigned_url, 60):
-                        video_url = lang_presigned_url
+                    # 언어별 동영상 키가 존재하는지 확인
+                    if lang_video_key:
+                        # URL 만료 확인 및 갱신
+                        if not lang_presigned_url or is_presigned_url_expired(lang_presigned_url, 60):
+                            try:
+                                new_lang_url = generate_presigned_url(lang_video_key, expires_in=604800)
+                                lang_video_doc.reference.update({
+                                    'presigned_url': new_lang_url,
+                                    'updated_at': datetime.utcnow().isoformat()
+                                })
+                                lang_presigned_url = new_lang_url
+                                app.logger.info(f"✅ 언어별 URL 갱신: {group_id} ({requested_lang})")
+                            except Exception as url_error:
+                                app.logger.error(f"언어별 URL 갱신 실패: {url_error}")
+                                # S3에서 파일 존재 확인
+                                try:
+                                    s3.head_object(Bucket=BUCKET_NAME, Key=lang_video_key)
+                                    new_lang_url = generate_presigned_url(lang_video_key, expires_in=604800)
+                                    lang_presigned_url = new_lang_url
+                                    app.logger.info(f"✅ S3 확인 후 URL 생성: {group_id} ({requested_lang})")
+                                except Exception as s3_error:
+                                    app.logger.warning(f"S3 파일 없음: {lang_video_key} - {s3_error}")
+                                    lang_presigned_url = None
+                        
+                        # 유효한 언어별 URL이 있으면 사용
+                        if lang_presigned_url and lang_presigned_url != video_data['presigned_url']:
+                            video_url = lang_presigned_url
+                            has_language_video = True
+                            actual_language = requested_lang
+                            language_video_info = {
+                                'language_code': requested_lang,
+                                'language_name': SUPPORTED_LANGUAGES[requested_lang],
+                                'video_key': lang_video_key,
+                                'duration': lang_video_data.get('duration', video_data.get('time', '0:00')),
+                                'file_size': lang_video_data.get('file_size', 0),
+                                'uploaded_at': lang_video_data.get('uploaded_at', ''),
+                            }
+                            
+                            app.logger.info(f"🌍 언어별 영상 사용: {group_id} ({requested_lang})")
+                        else:
+                            app.logger.warning(f"🌍 언어별 URL 무효, 한국어 사용: {group_id} ({requested_lang})")
                     else:
-                        # 언어별 URL 갱신
-                        lang_video_key = lang_video_data.get('video_key', '')
-                        if lang_video_key:
-                            new_lang_url = generate_presigned_url(lang_video_key, expires_in=604800)
-                            lang_video_doc.reference.update({
-                                'presigned_url': new_lang_url,
-                                'updated_at': datetime.utcnow().isoformat()
-                            })
-                            video_url = new_lang_url
+                        app.logger.warning(f"🌍 언어별 video_key 없음: {group_id} ({requested_lang})")
+                else:
+                    app.logger.info(f"🌍 언어별 문서 없음: {group_id} ({requested_lang})")
+                    
             except Exception as e:
-                app.logger.warning(f"언어별 동영상 확인 실패 ({requested_lang}): {e}")
+                app.logger.error(f"언어별 동영상 확인 실패 ({requested_lang}): {e}")
 
         if is_flutter_app:
-            return jsonify({
+            # Flutter 앱용 JSON 응답 - 언어별 정보 포함
+            response_data = {
                 'groupId': group_id,
                 'title': video_data['display_title'],
                 'main_category': video_data['display_main_category'],
@@ -1222,27 +1263,89 @@ def watch(group_id):
                 'video_url': video_url,
                 'qr_url': video_data.get('qr_presigned_url', ''),
                 'thumbnail_url': video_data.get('thumbnail_presigned_url', ''),
-                'language': requested_lang,
+                'requested_language': requested_lang,
+                'actual_language': actual_language,  # 🆕 실제 재생 언어
+                'has_language_video': has_language_video,  # 🆕 언어별 영상 존재 여부
+                'language_name': SUPPORTED_LANGUAGES.get(actual_language, '한국어'),
                 'time': video_data.get('time', '0:00'),
                 'level': video_data.get('level', ''),
-                'tag': video_data.get('tag', '')
-            })
+                'tag': video_data.get('tag', ''),
+                'supported_languages': list(SUPPORTED_LANGUAGES.keys()),  # 🆕 지원 언어 목록
+            }
+            
+            # 🆕 언어별 영상 정보가 있으면 추가
+            if language_video_info:
+                response_data['language_video_info'] = language_video_info
+            
+            # 🆕 폴백 메시지 (요청 언어와 실제 언어가 다른 경우)
+            if requested_lang != actual_language:
+                response_data['fallback_message'] = f"{SUPPORTED_LANGUAGES[requested_lang]}로 번역된 영상이 없어 한국어 영상으로 재생됩니다."
+            
+            return jsonify(response_data)
         else:
-            video_data['presigned_url'] = video_url  # 언어별 URL 적용
+            # 웹 브라우저용 HTML 응답
+            video_data['presigned_url'] = video_url
             return render_template(
                 'watch.html',
                 video_url=video_url,
                 video_data=video_data,
                 available_languages=SUPPORTED_LANGUAGES,
-                current_language=requested_lang
+                current_language=actual_language,
+                has_language_video=has_language_video
             )
             
     except Exception as e:
         app.logger.error(f"시청 페이지 오류: {e}")
         if 'is_flutter_app' in locals() and is_flutter_app:
-            return jsonify({'error': '비디오 로드 중 오류 발생'}), 500
+            return jsonify({'error': '비디오 로드 중 오류 발생', 'details': str(e)}), 500
         else:
             abort(500)
+
+# 🆕 언어별 영상 목록 조회 API 추가
+@app.route('/api/videos/<group_id>/languages', methods=['GET'])
+def get_video_languages(group_id):
+    """특정 영상의 사용 가능한 언어 목록 조회"""
+    try:
+        # 기본 한국어는 항상 있음
+        available_languages = {'ko': True}
+        
+        # 언어별 영상 확인
+        lang_videos_ref = db.collection('uploads').document(group_id).collection('language_videos')
+        lang_video_docs = lang_videos_ref.stream()
+        
+        for lang_video_doc in lang_video_docs:
+            lang_code = lang_video_doc.id
+            if lang_code in SUPPORTED_LANGUAGES:
+                lang_data = lang_video_doc.to_dict()
+                video_key = lang_data.get('video_key', '')
+                
+                # S3에서 실제 파일 존재 확인
+                try:
+                    if video_key:
+                        s3.head_object(Bucket=BUCKET_NAME, Key=video_key)
+                        available_languages[lang_code] = True
+                        app.logger.debug(f"✅ {lang_code} 언어 영상 확인: {group_id}")
+                    else:
+                        available_languages[lang_code] = False
+                except Exception:
+                    available_languages[lang_code] = False
+                    app.logger.debug(f"❌ {lang_code} 언어 영상 없음: {group_id}")
+        
+        # 지원하지 않는 언어는 False로 설정
+        for lang_code in SUPPORTED_LANGUAGES.keys():
+            if lang_code not in available_languages:
+                available_languages[lang_code] = False
+        
+        return jsonify({
+            'group_id': group_id,
+            'available_languages': available_languages,
+            'supported_languages': SUPPORTED_LANGUAGES,
+            'total_languages': len([lang for lang, available in available_languages.items() if available])
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"언어 목록 조회 실패 ({group_id}): {e}")
+        return jsonify({'error': '언어 목록을 가져올 수 없습니다.', 'details': str(e)}), 500
 
 # ===================================================================
 # 수료증 관련 API (기존 코드 유지)
@@ -1311,7 +1414,7 @@ def health_check():
                 'translator': get_translator() is not None
             },
             'supported_languages': list(SUPPORTED_LANGUAGES.keys()),
-            'version': '2.5.1-playstore-ready'
+            'version': '2.6.0-playstore-ready-with-multilang'
         }), 200 if overall_status == 'healthy' else 503
         
     except Exception as e:
@@ -1354,7 +1457,7 @@ def initialize_railway_environment():
             import logging
             app.logger.setLevel(logging.INFO)
         
-        app.logger.info("🚂 Railway 환경 초기화 완료 (플레이스토어 준수)")
+        app.logger.info("🚂 Railway 환경 초기화 완료 (플레이스토어 준수 + 다국어 지원)")
         return True
         
     except Exception as e:
