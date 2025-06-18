@@ -1,4 +1,4 @@
-# worker/certificate_worker.py - 구글 플레이스토어 보안 정책 준수 버전
+# worker/certificate_worker.py - 구글 플레이스토어 보안 정책 준수 + 디버깅 강화 버전
 
 import os
 import io
@@ -110,11 +110,11 @@ if not SecurityValidator.validate_environment():
     logger.error("🚨 보안 검증 실패 - 워커 종료")
     sys.exit(1)
 
-# 설정값 (보안 강화)
+# 설정값 (보안 강화) - 구글 플레이스토어 준수
 POLL_INTERVAL_SECONDS = max(30, int(os.getenv('POLL_INTERVAL_SECONDS', '45')))  # 최소 30초
 BATCH_SIZE = min(15, int(os.getenv('BATCH_SIZE', '10')))  # 최대 15개로 제한
 MASTER_FILENAME = SecurityValidator.sanitize_filename("master_certificates_secure.xlsx")
-MAX_RETRY_COUNT = 2  # 재시도 횟수 제한
+MAX_RETRY_COUNT = 5  # 🔧 재시도 횟수 증가 (기존 3회 초과 문서 처리를 위해)
 HEALTH_CHECK_INTERVAL = 300
 MAX_CONCURRENT_OPERATIONS = 3  # 동시 작업 수 제한
 
@@ -177,7 +177,7 @@ def initialize_firebase_secure() -> Tuple[Any, Any, Any]:
         test_doc = db.collection('_worker_health').document(test_doc_id)
         test_doc.set({
             'timestamp': firestore.SERVER_TIMESTAMP,
-            'worker_version': 'secure_v4.0',
+            'worker_version': 'secure_v4.1_debug',
             'security_level': 'enhanced',
             'test_token': test_token[:16]  # 일부만 저장
         })
@@ -244,16 +244,96 @@ def manage_operation(operation_id: str):
     return OperationManager(operation_id)
 
 # ===================================================================
-# 🔒 보안 강화된 데이터 처리 함수들
+# 🔒 보안 강화된 데이터 처리 함수들 (디버깅 강화)
 # ===================================================================
-def secure_collection_group_query(limit: int = 20) -> List[Tuple[str, str, Dict[str, Any]]]:
-    """보안 강화된 수료증 조회"""
-    operation_id = f"secure_query_{int(time.time())}"
+def secure_collection_group_query_with_debug(limit: int = 20) -> List[Tuple[str, str, Dict[str, Any]]]:
+    """보안 강화된 수료증 조회 (상세 디버깅 포함)"""
+    operation_id = f"secure_query_debug_{int(time.time())}"
     
     with manage_operation(operation_id):
         try:
             # 쿼리 제한 강화
             safe_limit = min(limit, MAX_CONCURRENT_OPERATIONS * 5)
+            
+            # 🔍 1단계: 전체 수료증 문서 수 확인
+            logger.info("🔍 1단계: 전체 수료증 문서 수 확인 중...")
+            try:
+                total_query = db.collection_group('completedCertificates').limit(100)
+                all_docs = list(total_query.stream())
+                logger.info(f"📊 전체 수료증 문서: {len(all_docs)}개 발견")
+                
+                # 샘플 분석
+                sample_analysis = {
+                    'has_pdfUrl': 0,
+                    'has_sentToAdmin_true': 0,
+                    'has_excelUpdated_false': 0,
+                    'retry_count_over_limit': 0,
+                    'valid_documents': 0
+                }
+                
+                for doc in all_docs[:20]:  # 처음 20개만 분석
+                    try:
+                        data = doc.to_dict()
+                        
+                        # 각 조건별 통계
+                        if data.get('pdfUrl', '').strip():
+                            sample_analysis['has_pdfUrl'] += 1
+                        
+                        if data.get('sentToAdmin', False):
+                            sample_analysis['has_sentToAdmin_true'] += 1
+                        
+                        if not data.get('excelUpdated', True):  # False인 경우
+                            sample_analysis['has_excelUpdated_false'] += 1
+                        
+                        retry_count = data.get('retryCount', 0)
+                        if retry_count >= MAX_RETRY_COUNT:
+                            sample_analysis['retry_count_over_limit'] += 1
+                        
+                        # 모든 조건 만족하는지 확인
+                        if (data.get('pdfUrl', '').strip() and 
+                            data.get('sentToAdmin', False) and 
+                            not data.get('excelUpdated', True) and 
+                            retry_count < MAX_RETRY_COUNT):
+                            sample_analysis['valid_documents'] += 1
+                            
+                    except Exception as e:
+                        logger.debug(f"문서 분석 중 오류: {e}")
+                        continue
+                
+                logger.info(f"📈 샘플 분석 결과 (상위 20개 문서):")
+                logger.info(f"  - PDF URL 있음: {sample_analysis['has_pdfUrl']}/20")
+                logger.info(f"  - sentToAdmin=true: {sample_analysis['has_sentToAdmin_true']}/20")
+                logger.info(f"  - excelUpdated=false: {sample_analysis['has_excelUpdated_false']}/20")
+                logger.info(f"  - 재시도 한도 초과: {sample_analysis['retry_count_over_limit']}/20")
+                logger.info(f"  - 처리 가능한 문서: {sample_analysis['valid_documents']}/20")
+                
+            except Exception as e:
+                logger.warning(f"⚠️ 전체 문서 분석 실패: {e}")
+            
+            # 🔍 2단계: 실제 필터링된 쿼리 실행
+            logger.info("🔍 2단계: 필터링된 쿼리 실행 중...")
+            
+            # 단계별 쿼리 실행
+            queries_to_test = [
+                ("기본 쿼리", db.collection_group('completedCertificates').limit(safe_limit)),
+                ("excelUpdated=false", db.collection_group('completedCertificates')
+                 .where('excelUpdated', '==', False).limit(safe_limit)),
+                ("sentToAdmin=true", db.collection_group('completedCertificates')
+                 .where('sentToAdmin', '==', True).limit(safe_limit)),
+                ("전체 조건", db.collection_group('completedCertificates')
+                 .where('excelUpdated', '==', False)
+                 .where('sentToAdmin', '==', True).limit(safe_limit))
+            ]
+            
+            for query_name, query in queries_to_test:
+                try:
+                    docs = list(query.stream())
+                    logger.info(f"  📋 {query_name}: {len(docs)}개 문서")
+                except Exception as e:
+                    logger.warning(f"  ❌ {query_name} 실패: {e}")
+            
+            # 🔍 3단계: 최종 처리 가능한 문서 필터링
+            logger.info("🔍 3단계: 최종 처리 가능한 문서 필터링...")
             
             query = db.collection_group('completedCertificates') \
                       .where('excelUpdated', '==', False) \
@@ -262,6 +342,13 @@ def secure_collection_group_query(limit: int = 20) -> List[Tuple[str, str, Dict[
             
             results = []
             processed_count = 0
+            skipped_reasons = {
+                'no_pdf_url': 0,
+                'retry_limit_exceeded': 0,
+                'invalid_path': 0,
+                'validation_failed': 0,
+                'parsing_error': 0
+            }
             
             for doc in query.stream():
                 if shutdown_flag or processed_count >= safe_limit:
@@ -274,18 +361,50 @@ def secure_collection_group_query(limit: int = 20) -> List[Tuple[str, str, Dict[
                     
                     # 🔒 데이터 보안 검증
                     if not secure_validate_certificate_data(data):
-                        logger.debug(f"⚠️ 보안 검증 실패한 문서 스킵")
+                        skipped_reasons['validation_failed'] += 1
+                        logger.debug(f"⚠️ 보안 검증 실패: {doc.id}")
                         continue
                     
                     # PDF URL 필수 확인
                     pdf_url = data.get('pdfUrl', '').strip()
                     if not pdf_url or not pdf_url.startswith('https://'):
+                        skipped_reasons['no_pdf_url'] += 1
+                        logger.debug(f"⚠️ PDF URL 없음: {doc.id}")
                         continue
                     
-                    # 재시도 횟수 확인
+                    # 🔧 재시도 횟수 확인 - 더 관대하게 처리
                     retry_count = data.get('retryCount', 0)
                     if retry_count >= MAX_RETRY_COUNT:
-                        continue
+                        skipped_reasons['retry_limit_exceeded'] += 1
+                        # 🔧 높은 재시도 횟수의 문서도 상세 정보 로깅
+                        lecture_title = data.get('lectureTitle', '제목없음')
+                        logger.info(f"⚠️ 재시도 한도 초과 문서: {doc.id[:12]}... - '{lecture_title[:20]}...' (시도: {retry_count}/{MAX_RETRY_COUNT})")
+                        
+                        # 🔧 선택적으로 재시도 리셋 (환경변수로 제어)
+                        reset_retry_count = os.getenv('RESET_HIGH_RETRY_COUNT', 'false').lower() == 'true'
+                        if reset_retry_count and retry_count <= 10:  # 10회 이하만 리셋
+                            logger.warning(f"🔄 재시도 카운터 리셋 시도: {doc.id[:12]}...")
+                            try:
+                                # 재시도 카운터를 0으로 리셋
+                                path_parts = doc.reference.path.split('/')
+                                if len(path_parts) >= 4:
+                                    user_uid = path_parts[1]
+                                    cert_ref = db.collection('users').document(user_uid) \
+                                                 .collection('completedCertificates').document(doc.id)
+                                    cert_ref.update({
+                                        'retryCount': 0,
+                                        'resetAt': firestore.SERVER_TIMESTAMP,
+                                        'resetReason': 'high_retry_count_reset'
+                                    })
+                                    logger.info(f"✅ 재시도 카운터 리셋 완료: {doc.id[:12]}...")
+                                    # 리셋 후 처리 계속
+                                else:
+                                    continue
+                            except Exception as reset_error:
+                                logger.debug(f"재시도 카운터 리셋 실패: {reset_error}")
+                                continue
+                        else:
+                            continue
                     
                     # 문서 경로 보안 검증
                     path_parts = doc.reference.path.split('/')
@@ -298,13 +417,44 @@ def secure_collection_group_query(limit: int = 20) -> List[Tuple[str, str, Dict[
                             results.append((user_uid, cert_id, data))
                             
                             if len(results) <= 2:  # 처음 2개만 로그
-                                logger.info(f"📋 보안 검증된 수료증 발견")
+                                lecture_title = data.get('lectureTitle', '제목없음')
+                                logger.info(f"✅ 처리 가능한 수료증: {user_uid[:8]}.../{cert_id[:8]}... - {lecture_title[:20]}...")
+                        else:
+                            skipped_reasons['validation_failed'] += 1
+                    else:
+                        skipped_reasons['invalid_path'] += 1
+                        logger.debug(f"⚠️ 잘못된 문서 경로: {doc.reference.path}")
                         
                 except Exception as e:
-                    logger.debug(f"⚠️ 문서 처리 중 오류")
+                    skipped_reasons['parsing_error'] += 1
+                    logger.debug(f"⚠️ 문서 파싱 오류 {doc.id}: {e}")
                     continue
             
-            logger.info(f"✅ 보안 쿼리 완료: {len(results)}개 수료증 발견")
+            # 🔧 최종 결과 로깅 (구체적인 해결책 포함)
+            logger.info(f"🎯 최종 결과:")
+            logger.info(f"  📊 검색된 문서: {processed_count}개")
+            logger.info(f"  ✅ 처리 가능: {len(results)}개")
+            logger.info(f"  ❌ 제외된 문서들:")
+            for reason, count in skipped_reasons.items():
+                if count > 0:
+                    reason_kr = {
+                        'no_pdf_url': 'PDF URL 없음',
+                        'retry_limit_exceeded': '재시도 한도 초과',
+                        'invalid_path': '잘못된 경로',
+                        'validation_failed': '검증 실패',
+                        'parsing_error': '파싱 오류'
+                    }.get(reason, reason)
+                    logger.info(f"    - {reason_kr}: {count}개")
+            
+            if len(results) == 0 and processed_count > 0:
+                logger.warning("⚠️ 문서는 있지만 처리 가능한 수료증이 없습니다!")
+                logger.warning("💡 주요 원인 및 해결 방법:")
+                logger.warning("  1. PDF URL이 비어있는 문서 → 앱에서 '관리자 전송' 버튼 클릭 필요")
+                logger.warning("  2. 재시도 횟수 초과 문서 → 환경변수 RESET_HIGH_RETRY_COUNT=true 설정")
+                logger.warning("  3. sentToAdmin=false 문서 → 앱에서 수료증 재전송 필요")
+                logger.warning("  4. excelUpdated=true 문서 → 이미 처리 완료된 문서")
+                logger.warning(f"🔧 현재 MAX_RETRY_COUNT: {MAX_RETRY_COUNT}, 재시도 리셋 기능: {os.getenv('RESET_HIGH_RETRY_COUNT', 'false')}")
+            
             return results
             
         except Exception as e:
@@ -543,7 +693,7 @@ def secure_save_master_excel(df: pd.DataFrame) -> bool:
                     secure_metadata = {
                         'contentType': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                         'metadata': {
-                            'worker_version': 'secure_v4.0',
+                            'worker_version': 'secure_v4.1_debug',
                             'updated_by': 'secure_worker',
                             'security_level': 'enhanced',
                             'row_count': str(len(df_clean))
@@ -679,7 +829,7 @@ def secure_update_certificate_flags_batch(processed_certs: List[Tuple[str, str, 
                         update_data = {
                             'excelUpdated': True,
                             'processedAt': firestore.SERVER_TIMESTAMP,
-                            'processedBy': 'secure_worker_v4',
+                            'processedBy': 'secure_worker_v4.1_debug',
                             'securityLevel': 'enhanced'
                         }
                         
@@ -725,21 +875,22 @@ def secure_update_certificate_flags_batch(processed_certs: List[Tuple[str, str, 
             logger.error(f"❌ 보안 배치 플래그 업데이트 실패")
 
 # ===================================================================
-# 🔒 보안 강화된 배치 처리
+# 🔒 보안 강화된 배치 처리 (디버깅 강화)
 # ===================================================================
 def secure_process_batch():
-    """보안 강화된 배치 처리"""
-    operation_id = f"secure_batch_{int(time.time())}"
+    """보안 강화된 배치 처리 (상세 디버깅 포함)"""
+    operation_id = f"secure_batch_debug_{int(time.time())}"
     
     with manage_operation(operation_id):
         try:
             batch_start_time = datetime.now(timezone.utc)
             
-            # 🔒 처리할 수료증 보안 조회
-            pending_certs = secure_collection_group_query(limit=BATCH_SIZE)
+            # 🔒 처리할 수료증 보안 조회 (디버깅 강화)
+            logger.info("🔍 상세 디버깅이 포함된 보안 배치 처리 시작")
+            pending_certs = secure_collection_group_query_with_debug(limit=BATCH_SIZE)
             
             if not pending_certs:
-                logger.debug("😴 처리할 보안 수료증 없음")
+                logger.info("😴 처리할 보안 수료증 없음 - 상세 분석 완료")
                 return
             
             logger.info(f"🔒 {len(pending_certs)}개 수료증 보안 배치 처리 시작")
@@ -824,7 +975,7 @@ def secure_update_health_status():
             'timestamp': datetime.now(timezone.utc).isoformat(),
             'active_operations': len(current_operations),
             'security_level': 'enhanced',
-            'worker_version': 'secure_v4.0'
+            'worker_version': 'secure_v4.1_debug'
         }
         
         with open(health_file, 'w') as f:
@@ -893,9 +1044,9 @@ def secure_get_statistics() -> Dict[str, Any]:
 # 🔒 보안 강화된 메인 워커 루프
 # ===================================================================
 def run_secure_worker():
-    """보안 강화된 메인 워커"""
-    logger.info(f"🔒 Secure Certificate Worker v4.0 시작")
-    logger.info(f"🛡️ 보안 레벨: Enhanced")
+    """보안 강화된 메인 워커 (디버깅 강화)"""
+    logger.info(f"🔒 Secure Certificate Worker v4.1 DEBUG 시작")
+    logger.info(f"🛡️ 보안 레벨: Enhanced + Debug")
     logger.info(f"⏱️ 폴링 간격: {POLL_INTERVAL_SECONDS}초")
     logger.info(f"📦 배치 크기: {BATCH_SIZE}")
     logger.info(f"🔄 최대 재시도: {MAX_RETRY_COUNT}")
@@ -932,7 +1083,7 @@ def run_secure_worker():
             # 이전 통계 저장
             prev_stats = secure_get_statistics()
             
-            # 🔒 보안 배치 처리
+            # 🔒 보안 배치 처리 (디버깅 강화)
             secure_process_batch()
             
             # 처리 후 통계 확인
@@ -1002,7 +1153,7 @@ if __name__ == "__main__":
         test_doc = test_collection.document(test_doc_id)
         test_doc.set({
             'timestamp': firestore.SERVER_TIMESTAMP,
-            'worker': 'secure_certificate_worker_v4',
+            'worker': 'secure_certificate_worker_v4.1_debug',
             'security_level': 'enhanced',
             'startup_time': datetime.now(timezone.utc).isoformat(),
             'test_token': test_token[:16]
