@@ -121,12 +121,17 @@ app.config['UPLOAD_FOLDER'] = 'static'
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1GB로 증가
 
 # 🔧 세션 쿠키 설정 수정 (Railway 환경 고려)
-app.config['SESSION_COOKIE_SECURE'] = True if os.environ.get('RAILWAY_ENVIRONMENT') else False
+is_railway = bool(os.environ.get('RAILWAY_ENVIRONMENT'))
+app.config['SESSION_COOKIE_SECURE'] = is_railway  # Railway에서만 Secure 설정
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=4)
 # Railway에서 HTTPS를 통해 접근할 때 필요
 app.config['SESSION_COOKIE_DOMAIN'] = None  # 자동으로 도메인 설정
+
+# 🔧 추가 세션 설정
+app.config['SESSION_COOKIE_NAME'] = 'admin_session'
+app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
@@ -171,28 +176,38 @@ def admin_required_flexible(f):
     """
     @wraps(f)
     def decorated(*args, **kwargs):
-        app.logger.debug("🔐 관리자 인증 확인 시작...")
-        
-        # 1. 세션 확인 (더 엄격하게)
-        if session.get('logged_in') == True:
-            app.logger.debug("✅ 세션 기반 인증 성공")
-            return f(*args, **kwargs)
-        
-        # 2. JWT 토큰 확인
-        auth_header = request.headers.get('Authorization', None)
-        if auth_header and auth_header.startswith('Bearer '):
-            token = auth_header.split(' ', 1)[1]
-            if verify_jwt_token(token):
-                app.logger.debug("✅ JWT 토큰 기반 인증 성공")
+        try:
+            app.logger.debug("🔐 관리자 인증 확인 시작...")
+            
+            # 1. 세션 확인 (더 엄격하게)
+            is_logged_in = session.get('logged_in', False)
+            if is_logged_in is True:
+                app.logger.debug("✅ 세션 기반 인증 성공")
                 return f(*args, **kwargs)
-        
-        # 3. API 요청인지 웹 요청인지 구분
-        if request.is_json or request.path.startswith('/api/'):
-            app.logger.warning("❌ API 요청 인증 실패")
-            return jsonify({'error': '관리자 인증이 필요합니다', 'code': 'AUTH_REQUIRED'}), 401
-        else:
-            app.logger.warning("❌ 웹 요청 인증 실패 - 로그인 페이지로 리다이렉트")
-            return redirect(url_for('login_page'))
+            
+            # 2. JWT 토큰 확인
+            auth_header = request.headers.get('Authorization', None)
+            if auth_header and auth_header.startswith('Bearer '):
+                token = auth_header.split(' ', 1)[1]
+                if verify_jwt_token(token):
+                    app.logger.debug("✅ JWT 토큰 기반 인증 성공")
+                    return f(*args, **kwargs)
+            
+            # 3. API 요청인지 웹 요청인지 구분
+            if request.is_json or request.path.startswith('/api/'):
+                app.logger.warning("❌ API 요청 인증 실패")
+                return jsonify({'error': '관리자 인증이 필요합니다', 'code': 'AUTH_REQUIRED'}), 401
+            else:
+                app.logger.warning("❌ 웹 요청 인증 실패 - 로그인 페이지로 리다이렉트")
+                return redirect(url_for('login_page'))
+                
+        except Exception as e:
+            app.logger.error(f"인증 데코레이터 오류: {e}")
+            # 오류 시 안전하게 로그인 페이지로
+            if request.is_json or request.path.startswith('/api/'):
+                return jsonify({'error': '인증 시스템 오류', 'code': 'AUTH_ERROR'}), 500
+            else:
+                return redirect(url_for('login_page'))
     
     return decorated
 
@@ -720,19 +735,50 @@ def start_background_scheduler():
     except Exception as e:
         app.logger.error(f"❌ 스케줄러 시작 실패: {e}")
 
-# ===================================================================
-# 🔧 수정된 로그인 관련 라우팅
-# ===================================================================
+# ==== 🔧 디버깅용 라우트 추가 ====
+
+@app.route('/debug/session', methods=['GET'])
+def debug_session():
+    """세션 디버깅용"""
+    return jsonify({
+        'session_data': dict(session),
+        'logged_in': session.get('logged_in', False),
+        'session_id': request.cookies.get('admin_session', 'None'),
+        'railway_env': bool(os.environ.get('RAILWAY_ENVIRONMENT')),
+        'secure_cookies': app.config['SESSION_COOKIE_SECURE'],
+        'request_is_secure': request.is_secure,
+        'cookies': dict(request.cookies)
+    })
+
+@app.route('/debug/clear_session', methods=['GET'])
+def debug_clear_session():
+    """세션 초기화용"""
+    session.clear()
+    return jsonify({'message': '세션이 초기화되었습니다'})
+
+# ==== 기존 라우팅 ====
 
 @app.route('/', methods=['GET'])
 def login_page():
     """로그인 페이지"""
-    # 이미 로그인된 사용자는 업로드 페이지로 리다이렉트
-    if session.get('logged_in') == True:
-        app.logger.info("이미 로그인된 사용자 - 업로드 페이지로 리다이렉트")
-        return redirect(url_for('upload_form'))
-    
-    return render_template('login.html')
+    try:
+        # 🔧 안전한 세션 체크
+        is_logged_in = session.get('logged_in', False)
+        app.logger.info(f"루트 페이지 접근 - 로그인 상태: {is_logged_in}")
+        
+        # 이미 로그인된 사용자는 업로드 페이지로 리다이렉트
+        if is_logged_in is True:
+            app.logger.info("이미 로그인된 사용자 - 업로드 페이지로 리다이렉트")
+            return redirect(url_for('upload_form'))
+        
+        # 로그인 페이지 렌더링
+        app.logger.info("로그인 페이지 표시")
+        return render_template('login.html')
+        
+    except Exception as e:
+        app.logger.error(f"로그인 페이지 오류: {e}")
+        # 오류가 발생해도 로그인 페이지는 표시
+        return render_template('login.html')
 
 @app.route('/login', methods=['POST'])
 def login():
