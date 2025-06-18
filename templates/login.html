@@ -200,6 +200,12 @@
             border: 1px solid #f5c6cb;
         }
 
+        .connection-status.checking {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+
         .loading-spinner {
             display: inline-block;
             width: 16px;
@@ -216,6 +222,21 @@
             100% { transform: rotate(360deg); }
         }
 
+        /* 🆕 이메일 입력 필드 추가 */
+        .email-group {
+            margin-bottom: 15px;
+        }
+
+        .email-input {
+            background: #e8f4fd;
+            border-color: #bee5eb;
+        }
+
+        .email-input:focus {
+            border-color: #17a2b8;
+            box-shadow: 0 0 0 3px rgba(23, 162, 184, 0.1);
+        }
+
         @media (max-width: 480px) {
             .login-container {
                 padding: 30px 20px;
@@ -226,7 +247,7 @@
 </head>
 <body>
     <!-- 🆕 연결 상태 표시 -->
-    <div id="connectionStatus" class="connection-status disconnected">
+    <div id="connectionStatus" class="connection-status checking">
         🔄 서버 연결 확인 중...
     </div>
 
@@ -234,7 +255,7 @@
         <div class="login-header">
             <div class="admin-icon">🔐</div>
             <h2>관리자 인증</h2>
-            <p>비밀번호를 입력하세요</p>
+            <p>이메일과 비밀번호를 입력하세요</p>
         </div>
 
         <form method="post" action="/login" id="loginForm">
@@ -244,10 +265,27 @@
             </div>
             {% endif %}
 
+            <!-- 🆕 이메일 입력 필드 추가 -->
+            <div class="form-group email-group">
+                <label for="email" class="form-label">관리자 이메일</label>
+                <input 
+                    type="email" 
+                    id="email"
+                    name="email" 
+                    class="form-input email-input"
+                    placeholder="admin@example.com"
+                    value="admin@example.com"
+                    required
+                    autocomplete="email"
+                />
+            </div>
+
             <div class="form-group">
+                <label for="password" class="form-label">비밀번호</label>
                 <div style="position: relative;">
                     <input 
                         type="password" 
+                        id="password"
                         name="password" 
                         class="form-input"
                         placeholder="비밀번호"
@@ -267,25 +305,34 @@
         </form>
 
         <div class="security-note">
-            🔒 보안 연결로 보호됩니다 | 🚂 Railway 호스팅
+            🔒 보안 연결로 보호됩니다 | 🚂 Railway 호스팅<br>
+            <small>v2.5.1 - 플레이스토어 준수</small>
         </div>
     </div>
 
     <script>
-        // 🆕 서버 연결 상태 확인
+        // 🆕 서버 연결 상태 확인 - 개선된 버전
         async function checkServerConnection() {
             const statusEl = document.getElementById('connectionStatus');
             
             try {
+                statusEl.textContent = '🔄 서버 연결 확인 중...';
+                statusEl.className = 'connection-status checking';
+                
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 8000); // 8초 타임아웃
+                
                 const response = await fetch('/health', { 
                     method: 'GET',
                     cache: 'no-cache',
-                    timeout: 5000
+                    signal: controller.signal
                 });
+                
+                clearTimeout(timeoutId);
                 
                 if (response.ok) {
                     const data = await response.json();
-                    statusEl.textContent = `✅ 서버 연결됨 (v${data.version || '2.5.1'})`;
+                    statusEl.textContent = `✅ 서버 연결됨 (${data.version || 'v2.5.1'})`;
                     statusEl.className = 'connection-status connected';
                     
                     // 3초 후 자동 숨김
@@ -298,8 +345,51 @@
                 }
             } catch (error) {
                 console.error('서버 연결 확인 실패:', error);
-                statusEl.textContent = `❌ 서버 연결 실패`;
+                
+                if (error.name === 'AbortError') {
+                    statusEl.textContent = `⏰ 연결 시간 초과`;
+                } else {
+                    statusEl.textContent = `❌ 서버 연결 실패`;
+                }
                 statusEl.className = 'connection-status disconnected';
+                
+                // 5초 후 재시도
+                setTimeout(checkServerConnection, 5000);
+            }
+        }
+
+        // 🆕 인증 상태 확인 - 수정된 버전
+        async function checkAuthStatus() {
+            try {
+                const response = await fetch('/api/admin/check_auth', {
+                    method: 'GET',
+                    credentials: 'same-origin',
+                    cache: 'no-cache'
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.authenticated) {
+                        console.log('✅ 이미 로그인된 상태 감지');
+                        
+                        const statusEl = document.getElementById('connectionStatus');
+                        statusEl.textContent = '✅ 이미 로그인됨 - 리다이렉트 중...';
+                        statusEl.className = 'connection-status connected';
+                        statusEl.style.display = 'block';
+                        statusEl.style.opacity = '1';
+                        
+                        // 1.5초 후 리다이렉트
+                        setTimeout(() => {
+                            window.location.href = '/upload_form';
+                        }, 1500);
+                        
+                        return true;
+                    }
+                }
+                return false;
+            } catch (error) {
+                console.log('인증 상태 확인:', error.message);
+                return false;
             }
         }
 
@@ -319,60 +409,93 @@
         // 폼 제출 시 버튼 로딩 효과
         document.getElementById('loginForm').addEventListener('submit', function(e) {
             const button = document.getElementById('loginBtn');
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+            
+            // 기본 검증
+            if (!email || !password) {
+                e.preventDefault();
+                alert('이메일과 비밀번호를 모두 입력해주세요.');
+                return;
+            }
+            
             button.innerHTML = '<span class="loading-spinner"></span>인증 중...';
             button.disabled = true;
             
-            // 타임아웃 설정 (10초 후 복구)
+            // 타임아웃 설정 (15초 후 복구)
             setTimeout(() => {
                 if (button.disabled) {
                     button.textContent = '입장';
                     button.disabled = false;
                 }
-            }, 10000);
+            }, 15000);
         });
 
-        // 🆕 자동 완성 개선
-        document.addEventListener('DOMContentLoaded', function() {
+        // 🆕 자동 완성 및 초기화 개선
+        document.addEventListener('DOMContentLoaded', async function() {
             const container = document.querySelector('.login-container');
             container.style.opacity = '0';
             container.style.transform = 'translateY(20px)';
             
-            // 서버 연결 상태 확인
+            // 1. 서버 연결 상태 확인
             checkServerConnection();
             
-            setTimeout(() => {
-                container.style.transition = 'all 0.6s ease';
-                container.style.opacity = '1';
-                container.style.transform = 'translateY(0)';
-            }, 100);
-
-            // 🆕 세션 상태 확인 (이미 로그인된 경우)
-            fetch('/api/admin/check_auth', {
-                method: 'GET',
-                credentials: 'same-origin'
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.authenticated) {
-                    console.log('이미 로그인된 상태 감지');
-                    // 잠시 메시지 표시 후 리다이렉트
-                    const statusEl = document.getElementById('connectionStatus');
-                    statusEl.textContent = '✅ 이미 로그인됨 - 리다이렉트 중...';
-                    statusEl.className = 'connection-status connected';
-                    
-                    setTimeout(() => {
-                        window.location.href = '/upload_form';
-                    }, 1500);
-                }
-            })
-            .catch(console.error);
+            // 2. 인증 상태 확인 (병렬 실행)
+            const isAlreadyLoggedIn = await checkAuthStatus();
+            
+            // 3. 이미 로그인되지 않은 경우에만 로그인 폼 표시
+            if (!isAlreadyLoggedIn) {
+                setTimeout(() => {
+                    container.style.transition = 'all 0.6s ease';
+                    container.style.opacity = '1';
+                    container.style.transform = 'translateY(0)';
+                }, 100);
+            }
         });
 
         // 🆕 엔터 키 처리 개선
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') {
                 e.preventDefault();
-                document.getElementById('loginForm').requestSubmit();
+                
+                const form = document.getElementById('loginForm');
+                const email = document.getElementById('email').value;
+                const password = document.getElementById('password').value;
+                
+                if (email && password) {
+                    form.requestSubmit();
+                } else {
+                    // 빈 필드로 포커스 이동
+                    if (!email) {
+                        document.getElementById('email').focus();
+                    } else if (!password) {
+                        document.getElementById('password').focus();
+                    }
+                }
+            }
+        });
+
+        // 🆕 페이지 가시성 변경 시 연결 상태 재확인
+        document.addEventListener('visibilitychange', function() {
+            if (!document.hidden) {
+                // 페이지가 다시 보일 때 서버 상태 재확인
+                setTimeout(checkServerConnection, 500);
+            }
+        });
+
+        // 🆕 개발자 모드 단축키 (Ctrl+Shift+D)
+        document.addEventListener('keydown', function(e) {
+            if (e.ctrlKey && e.shiftKey && e.key === 'D') {
+                e.preventDefault();
+                console.log('🔧 개발자 모드 정보:');
+                console.log('- 현재 URL:', window.location.href);
+                console.log('- User Agent:', navigator.userAgent);
+                console.log('- 화면 크기:', `${window.innerWidth}x${window.innerHeight}`);
+                console.log('- 로컬 스토리지:', localStorage);
+                console.log('- 세션 스토리지:', sessionStorage);
+                
+                // 서버 헬스체크 강제 실행
+                checkServerConnection();
             }
         });
     </script>

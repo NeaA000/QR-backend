@@ -45,7 +45,7 @@ from googletrans import Translator
 import time
 
 # ==== 환경변수 설정 (보안 강화) ====
-ADMIN_EMAIL       = os.environ.get('ADMIN_EMAIL', '')
+ADMIN_EMAIL       = os.environ.get('ADMIN_EMAIL', 'admin@example.com')
 ADMIN_PASSWORD    = os.environ.get('ADMIN_PASSWORD', 'changeme')
 JWT_SECRET        = os.environ.get('JWT_SECRET', 'supersecretjwt')
 JWT_ALGORITHM     = 'HS256'
@@ -547,17 +547,29 @@ def verify_jwt_token(token: str) -> bool:
         return False
 
 def admin_required(f):
-    """관리자 인증 데코레이터"""
+    """관리자 인증 데코레이터 - 세션과 JWT 둘 다 지원"""
     @wraps(f)
     def decorated(*args, **kwargs):
+        # 1. Flask 세션 확인 (우선순위)
+        if session.get('logged_in'):
+            return f(*args, **kwargs)
+        
+        # 2. JWT 토큰 확인
         auth_header = request.headers.get('Authorization', None)
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return jsonify({'error': '관리자 인증 필요'}), 401
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ', 1)[1]
+            if verify_jwt_token(token):
+                return f(*args, **kwargs)
+        
+        return jsonify({'error': '관리자 인증 필요'}), 401
+    return decorated
 
-        token = auth_header.split(' ', 1)[1]
-        if not verify_jwt_token(token):
-            return jsonify({'error': '유효하지 않은 또는 만료된 토큰'}), 401
-
+def session_required(f):
+    """세션 기반 인증만 확인"""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get('logged_in'):
+            return redirect(url_for('login_page'))
         return f(*args, **kwargs)
     return decorated
 
@@ -690,15 +702,263 @@ def start_background_scheduler():
         app.logger.error(f"❌ 스케줄러 시작 실패: {e}")
 
 # ===================================================================
+# 🆕 메인 라우팅 및 API 엔드포인트들 (누락된 API들 추가)
+# ===================================================================
+
+@app.route('/', methods=['GET'])
+def login_page():
+    """로그인 페이지"""
+    return render_template('login.html')
+
+@app.route('/login', methods=['POST'])
+def login():
+    """관리자 로그인"""
+    try:
+        pw = request.form.get('password', '')
+        email = request.form.get('email', ADMIN_EMAIL)  # 이메일 기본값 설정
+
+        if email == ADMIN_EMAIL and pw == ADMIN_PASSWORD:
+            session['logged_in'] = True
+            session['admin_email'] = email
+            session['login_time'] = datetime.utcnow().isoformat()
+            return redirect(url_for('upload_form'))
+        return render_template('login.html', error="인증 실패")
+    except Exception as e:
+        app.logger.error(f"로그인 오류: {e}")
+        return render_template('login.html', error="로그인 처리 중 오류 발생")
+
+@app.route('/logout', methods=['GET'])
+def logout():
+    """로그아웃"""
+    session.clear()
+    return redirect(url_for('login_page'))
+
+# 🆕 누락된 API 엔드포인트들 추가
+
+@app.route('/api/admin/check_auth', methods=['GET'])
+def api_check_auth():
+    """세션 인증 상태 확인 API"""
+    try:
+        is_authenticated = session.get('logged_in', False)
+        if is_authenticated:
+            return jsonify({
+                'authenticated': True,
+                'email': session.get('admin_email', ADMIN_EMAIL),
+                'login_time': session.get('login_time')
+            }), 200
+        else:
+            return jsonify({'authenticated': False}), 200
+    except Exception as e:
+        app.logger.error(f"인증 상태 확인 오류: {e}")
+        return jsonify({'authenticated': False, 'error': str(e)}), 500
+
+@app.route('/api/admin/login', methods=['POST'])
+def api_admin_login():
+    """Flutter 관리자 로그인"""
+    try:
+        data = request.get_json() or {}
+        email = data.get('email', '').strip()
+        password = data.get('password', '')
+
+        # 세션 인증이 이미 되어 있으면 JWT 발급
+        if session.get('logged_in') or (email == ADMIN_EMAIL and password == ADMIN_PASSWORD):
+            token = create_jwt_for_admin()
+            return jsonify({'token': token}), 200
+        else:
+            return jsonify({'error': '관리자 인증 실패'}), 401
+    except Exception as e:
+        app.logger.error(f"API 로그인 오류: {e}")
+        return jsonify({'error': '로그인 처리 중 오류 발생'}), 500
+
+@app.route('/api/admin/videos', methods=['GET'])
+@admin_required
+def api_get_videos():
+    """업로드된 영상 목록 조회 API"""
+    try:
+        uploads_ref = db.collection('uploads')
+        docs = uploads_ref.stream()
+        
+        videos = []
+        for doc in docs:
+            data = doc.to_dict()
+            
+            # 각 영상의 언어별 지원 현황 확인
+            languages = {'ko': True}  # 한국어는 기본적으로 있음
+            
+            # 번역 컬렉션에서 언어별 지원 확인
+            try:
+                translations_ref = doc.reference.collection('translations')
+                translation_docs = translations_ref.stream()
+                
+                for trans_doc in translation_docs:
+                    lang_code = trans_doc.id
+                    if lang_code in SUPPORTED_LANGUAGES:
+                        languages[lang_code] = True
+            except Exception as e:
+                app.logger.warning(f"번역 정보 조회 실패 ({doc.id}): {e}")
+            
+            # 언어별 동영상 파일 지원 확인 (향후 확장)
+            # TODO: 언어별 별도 동영상 파일이 있는지 확인하는 로직 추가
+            
+            video_info = {
+                'group_id': data.get('group_id', doc.id),
+                'title': data.get('group_name', '제목 없음'),
+                'main_category': data.get('main_category', ''),
+                'sub_category': data.get('sub_category', ''),
+                'sub_sub_category': data.get('sub_sub_category', ''),
+                'upload_date': data.get('upload_date', ''),
+                'time': data.get('time', '0:00'),
+                'level': data.get('level', ''),
+                'tag': data.get('tag', ''),
+                'languages': languages,
+                'translation_status': data.get('translation_status', 'unknown'),
+                'created_at': data.get('created_at', ''),
+                'updated_at': data.get('updated_at', '')
+            }
+            videos.append(video_info)
+        
+        # 최신순 정렬
+        videos.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        return jsonify({
+            'videos': videos,
+            'total': len(videos),
+            'supported_languages': SUPPORTED_LANGUAGES
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"영상 목록 조회 실패: {e}")
+        return jsonify({'error': '영상 목록을 가져올 수 없습니다.', 'details': str(e)}), 500
+
+@app.route('/api/admin/upload_language_video', methods=['POST'])
+@admin_required
+def api_upload_language_video():
+    """특정 언어의 동영상 파일 업로드 API"""
+    try:
+        group_id = request.form.get('group_id')
+        language_code = request.form.get('language_code')
+        file = request.files.get('file')
+        
+        if not all([group_id, language_code, file]):
+            return jsonify({'error': '필수 파라미터가 누락되었습니다.'}), 400
+        
+        if language_code not in SUPPORTED_LANGUAGES:
+            return jsonify({'error': f'지원되지 않는 언어입니다: {language_code}'}), 400
+        
+        # 기존 그룹 문서 확인
+        root_doc_ref = db.collection('uploads').document(group_id)
+        root_doc = root_doc_ref.get()
+        
+        if not root_doc.exists:
+            return jsonify({'error': '해당 그룹 ID의 영상을 찾을 수 없습니다.'}), 404
+        
+        root_data = root_doc.to_dict()
+        
+        # 파일 업로드 처리
+        ext = Path(file.filename).suffix.lower() or '.mp4'
+        date_str = datetime.now().strftime('%Y%m%d')
+        safe_name = re.sub(r'[^\w]', '_', root_data.get('group_name', 'video'))
+        
+        # 언어별 동영상 키 생성
+        folder = f"videos/{group_id}_{safe_name}_{date_str}"
+        lang_video_key = f"{folder}/video_{language_code}{ext}"
+        
+        # 임시 저장 및 S3 업로드
+        tmp_path = Path(tempfile.gettempdir()) / f"{group_id}_{language_code}{ext}"
+        file.save(tmp_path)
+        
+        try:
+            # 동영상 길이 계산
+            with VideoFileClip(str(tmp_path)) as clip:
+                duration_sec = int(clip.duration)
+        except Exception as e:
+            duration_sec = 0
+            app.logger.warning(f"동영상 길이 계산 실패: {e}")
+        
+        minutes = duration_sec // 60
+        seconds = duration_sec % 60
+        lecture_time = f"{minutes}:{seconds:02d}"
+        
+        # S3 업로드
+        s3.upload_file(str(tmp_path), BUCKET_NAME, lang_video_key, Config=config)
+        tmp_path.unlink(missing_ok=True)
+        
+        lang_presigned_url = generate_presigned_url(lang_video_key, expires_in=604800)
+        
+        # 언어별 동영상 정보를 별도 컬렉션에 저장
+        lang_video_data = {
+            'language_code': language_code,
+            'language_name': SUPPORTED_LANGUAGES[language_code],
+            'video_key': lang_video_key,
+            'presigned_url': lang_presigned_url,
+            'duration': lecture_time,
+            'file_size': os.path.getsize(str(tmp_path)) if tmp_path.exists() else 0,
+            'uploaded_at': datetime.utcnow().isoformat(),
+            'updated_at': datetime.utcnow().isoformat()
+        }
+        
+        # 언어별 동영상 정보 저장
+        lang_videos_ref = root_doc_ref.collection('language_videos').document(language_code)
+        lang_videos_ref.set(lang_video_data)
+        
+        # 루트 문서에 언어별 동영상 지원 정보 업데이트
+        supported_languages = root_data.get('supported_video_languages', ['ko'])
+        if language_code not in supported_languages:
+            supported_languages.append(language_code)
+        
+        root_doc_ref.update({
+            'supported_video_languages': supported_languages,
+            'updated_at': datetime.utcnow().isoformat()
+        })
+        
+        app.logger.info(f"✅ 언어별 영상 업로드 완료: {group_id} ({language_code})")
+        
+        return jsonify({
+            'message': f'{SUPPORTED_LANGUAGES[language_code]} 영상이 성공적으로 업로드되었습니다.',
+            'group_id': group_id,
+            'language_code': language_code,
+            'video_url': lang_presigned_url,
+            'duration': lecture_time
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"언어별 영상 업로드 실패: {e}")
+        return jsonify({'error': '영상 업로드 중 오류가 발생했습니다.', 'details': str(e)}), 500
+
+@app.route('/upload_form', methods=['GET'])
+@session_required
+def upload_form():
+    """업로드 폼 페이지"""
+    main_cats = ['기계', '공구', '장비', '약품']
+    sub_map = {
+        '기계': ['공작기계', '제조기계', '산업기계'],
+        '공구': ['수공구', '전동공구', '절삭공구'],
+        '장비': ['안전장비', '운송장비', '작업장비'],
+        '약품': ['의약품', '화공약품'],
+    }
+    leaf_map = {
+        '공작기계': ['불도저', '크레인', '굴착기'],
+        '제조기계': ['사출 성형기', '프레스기', '열성형기'],
+        '산업기계': ['CNC 선반', '절삭기', '연삭기'],
+        '수공구': ['드릴', '해머', '플라이어'],
+        '전동공구': ['그라인더', '전동 드릴', '해머드릴'],
+        '절삭공구': ['커터', '플라즈마 노즐', '드릴 비트'],
+        '안전장비': ['헬멧', '방진 마스크', '낙하 방지벨트'],
+        '운송장비': ['리프트 장비', '체인 블록', '호이스트'],
+        '작업장비': ['스캐폴딩', '작업대', '리프트 테이블'],
+        '의약품': ['항생제', '인슐린', '항응고제'],
+        '화공약품': ['황산', '염산', '수산화나트륨']
+    }
+    return render_template('upload_form.html', mains=main_cats, subs=sub_map, leafs=leaf_map)
+
+# ===================================================================
 # 업로드 핸들러 (성능 최적화)
 # ===================================================================
 
 @app.route('/upload', methods=['POST'])
+@session_required
 def upload_video():
     """최적화된 업로드 처리 - 번역을 백그라운드로 이동"""
-    if not session.get('logged_in'):
-        return redirect(url_for('login_page'))
-
     file = request.files.get('file')
     thumbnail = request.files.get('thumbnail')
     group_name = request.form.get('group_name', 'default')
@@ -808,7 +1068,8 @@ def upload_video():
         'upload_date': date_str,
         'created_at': datetime.utcnow().isoformat(),
         'updated_at': datetime.utcnow().isoformat(),
-        'translation_status': 'partial'  # 부분 번역 상태
+        'translation_status': 'partial',  # 부분 번역 상태
+        'supported_video_languages': ['ko']  # 기본적으로 한국어 지원
     }
 
     if thumbnail_key:
@@ -879,75 +1140,6 @@ def upload_video():
         thumbnail_url=thumbnail_presigned_url
     )
 
-# ===================================================================
-# 나머지 라우팅 및 API 엔드포인트들 (기존 코드 유지, 에러 처리 강화)
-# ===================================================================
-
-@app.route('/', methods=['GET'])
-def login_page():
-    """로그인 페이지"""
-    return render_template('login.html')
-
-@app.route('/login', methods=['POST'])
-def login():
-    """관리자 로그인"""
-    try:
-        pw = request.form.get('password', '')
-        email = request.form.get('email', '')
-
-        if email == ADMIN_EMAIL and pw == ADMIN_PASSWORD:
-            session['logged_in'] = True
-            return redirect(url_for('upload_form'))
-        return render_template('login.html', error="인증 실패")
-    except Exception as e:
-        app.logger.error(f"로그인 오류: {e}")
-        return render_template('login.html', error="로그인 처리 중 오류 발생")
-
-@app.route('/api/admin/login', methods=['POST'])
-def api_admin_login():
-    """Flutter 관리자 로그인"""
-    try:
-        data = request.get_json() or {}
-        email = data.get('email', '').strip()
-        password = data.get('password', '')
-
-        if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
-            token = create_jwt_for_admin()
-            return jsonify({'token': token}), 200
-        else:
-            return jsonify({'error': '관리자 인증 실패'}), 401
-    except Exception as e:
-        app.logger.error(f"API 로그인 오류: {e}")
-        return jsonify({'error': '로그인 처리 중 오류 발생'}), 500
-
-@app.route('/upload_form', methods=['GET'])
-def upload_form():
-    """업로드 폼 페이지"""
-    if not session.get('logged_in'):
-        return redirect(url_for('login_page'))
-
-    main_cats = ['기계', '공구', '장비', '약품']
-    sub_map = {
-        '기계': ['공작기계', '제조기계', '산업기계'],
-        '공구': ['수공구', '전동공구', '절삭공구'],
-        '장비': ['안전장비', '운송장비', '작업장비'],
-        '약품': ['의약품', '화공약품'],
-    }
-    leaf_map = {
-        '공작기계': ['불도저', '크레인', '굴착기'],
-        '제조기계': ['사출 성형기', '프레스기', '열성형기'],
-        '산업기계': ['CNC 선반', '절삭기', '연삭기'],
-        '수공구': ['드릴', '해머', '플라이어'],
-        '전동공구': ['그라인더', '전동 드릴', '해머드릴'],
-        '절삭공구': ['커터', '플라즈마 노즐', '드릴 비트'],
-        '안전장비': ['헬멧', '방진 마스크', '낙하 방지벨트'],
-        '운송장비': ['리프트 장비', '체인 블록', '호이스트'],
-        '작업장비': ['스캐폴딩', '작업대', '리프트 테이블'],
-        '의약품': ['항생제', '인슐린', '항응고제'],
-        '화공약품': ['황산', '염산', '수산화나트륨']
-    }
-    return render_template('upload_form.html', mains=main_cats, subs=sub_map, leafs=leaf_map)
-
 @app.route('/watch/<group_id>', methods=['GET'])
 def watch(group_id):
     """동영상 시청 페이지"""
@@ -977,13 +1169,41 @@ def watch(group_id):
             })
             video_data['presigned_url'] = new_presigned_url
 
+        # 🆕 언어별 동영상 확인
+        video_url = video_data['presigned_url']  # 기본값 (한국어)
+        
+        if requested_lang != 'ko':
+            try:
+                lang_video_doc = db.collection('uploads').document(group_id) \
+                                  .collection('language_videos').document(requested_lang).get()
+                
+                if lang_video_doc.exists:
+                    lang_video_data = lang_video_doc.to_dict()
+                    lang_presigned_url = lang_video_data.get('presigned_url', '')
+                    
+                    # 언어별 URL 만료 확인
+                    if lang_presigned_url and not is_presigned_url_expired(lang_presigned_url, 60):
+                        video_url = lang_presigned_url
+                    else:
+                        # 언어별 URL 갱신
+                        lang_video_key = lang_video_data.get('video_key', '')
+                        if lang_video_key:
+                            new_lang_url = generate_presigned_url(lang_video_key, expires_in=604800)
+                            lang_video_doc.reference.update({
+                                'presigned_url': new_lang_url,
+                                'updated_at': datetime.utcnow().isoformat()
+                            })
+                            video_url = new_lang_url
+            except Exception as e:
+                app.logger.warning(f"언어별 동영상 확인 실패 ({requested_lang}): {e}")
+
         if is_flutter_app:
             return jsonify({
                 'groupId': group_id,
                 'title': video_data['display_title'],
                 'main_category': video_data['display_main_category'],
                 'sub_category': video_data['display_sub_category'],
-                'video_url': video_data['presigned_url'],
+                'video_url': video_url,
                 'qr_url': video_data.get('qr_presigned_url', ''),
                 'thumbnail_url': video_data.get('thumbnail_presigned_url', ''),
                 'language': requested_lang,
@@ -992,9 +1212,10 @@ def watch(group_id):
                 'tag': video_data.get('tag', '')
             })
         else:
+            video_data['presigned_url'] = video_url  # 언어별 URL 적용
             return render_template(
                 'watch.html',
-                video_url=video_data['presigned_url'],
+                video_url=video_url,
                 video_data=video_data,
                 available_languages=SUPPORTED_LANGUAGES,
                 current_language=requested_lang
@@ -1074,7 +1295,7 @@ def health_check():
                 'translator': get_translator() is not None
             },
             'supported_languages': list(SUPPORTED_LANGUAGES.keys()),
-            'version': '2.2.0-playstore-ready'
+            'version': '2.5.1-playstore-ready'
         }), 200 if overall_status == 'healthy' else 503
         
     except Exception as e:
