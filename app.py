@@ -1,4 +1,4 @@
-# backend/app.py - 완전 수정 버전 (인증 문제 해결 + 직접 업로드 지원)
+# backend/app.py - 완전 수정 버전 (인증 문제 해결 + 모든 기능 유지)
 
 import os
 import uuid
@@ -15,7 +15,7 @@ import json
 
 from flask import (
     Flask, request, render_template,
-    redirect, url_for, session, abort, jsonify
+    redirect, url_for, session, abort, jsonify, make_response
 )
 import boto3
 from boto3.s3.transfer import TransferConfig
@@ -45,7 +45,7 @@ from googletrans import Translator
 import time
 
 # ==== 환경변수 설정 ====
-ADMIN_EMAIL       = os.environ.get('ADMIN_EMAIL', '')
+ADMIN_EMAIL       = os.environ.get('ADMIN_EMAIL', 'admin@example.com')
 ADMIN_PASSWORD    = os.environ.get('ADMIN_PASSWORD', 'changeme')
 JWT_SECRET        = os.environ.get('JWT_SECRET', 'supersecretjwt')
 JWT_ALGORITHM     = 'HS256'
@@ -116,9 +116,18 @@ bucket = storage.bucket()  # Firebase Storage 기본 버킷
 
 # ==== Flask 앱 설정 ====
 app = Flask(__name__)
-app.secret_key                   = SECRET_KEY
-app.config['UPLOAD_FOLDER']      = 'static'
+app.secret_key = SECRET_KEY
+app.config['UPLOAD_FOLDER'] = 'static'
 app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024 * 1024  # 1GB로 증가
+
+# 🔧 세션 쿠키 설정 수정 (Railway 환경 고려)
+app.config['SESSION_COOKIE_SECURE'] = True if os.environ.get('RAILWAY_ENVIRONMENT') else False
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=4)
+# Railway에서 HTTPS를 통해 접근할 때 필요
+app.config['SESSION_COOKIE_DOMAIN'] = None  # 자동으로 도메인 설정
+
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # 보안 헤더 설정
@@ -132,6 +141,7 @@ def after_request(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Allow-Credentials'] = 'true'
     return response
 
 # ==== Wasabi S3 클라이언트 설정 ====
@@ -152,14 +162,20 @@ config = TransferConfig(
     use_threads         = True
 )
 
-# ==== 수정된 관리자 인증 데코레이터 ====
+# ==== 🔧 수정된 관리자 인증 데코레이터 ====
 
 def admin_required_flexible(f):
-    """유연한 관리자 인증 데코레이터 - 세션 또는 JWT 토큰 둘 중 하나만 있어도 허용"""
+    """
+    유연한 관리자 인증 데코레이터 - 세션 또는 JWT 토큰 둘 중 하나만 있어도 허용
+    Railway 환경에서 세션 문제 해결
+    """
     @wraps(f)
     def decorated(*args, **kwargs):
-        # 1. 세션 확인
-        if session.get('logged_in'):
+        app.logger.debug("🔐 관리자 인증 확인 시작...")
+        
+        # 1. 세션 확인 (더 엄격하게)
+        if session.get('logged_in') == True:
+            app.logger.debug("✅ 세션 기반 인증 성공")
             return f(*args, **kwargs)
         
         # 2. JWT 토큰 확인
@@ -167,10 +183,16 @@ def admin_required_flexible(f):
         if auth_header and auth_header.startswith('Bearer '):
             token = auth_header.split(' ', 1)[1]
             if verify_jwt_token(token):
+                app.logger.debug("✅ JWT 토큰 기반 인증 성공")
                 return f(*args, **kwargs)
         
-        # 3. 둘 다 없으면 인증 실패
-        return jsonify({'error': '관리자 인증이 필요합니다'}), 401
+        # 3. API 요청인지 웹 요청인지 구분
+        if request.is_json or request.path.startswith('/api/'):
+            app.logger.warning("❌ API 요청 인증 실패")
+            return jsonify({'error': '관리자 인증이 필요합니다', 'code': 'AUTH_REQUIRED'}), 401
+        else:
+            app.logger.warning("❌ 웹 요청 인증 실패 - 로그인 페이지로 리다이렉트")
+            return redirect(url_for('login_page'))
     
     return decorated
 
@@ -188,6 +210,35 @@ def admin_required(f):
 
         return f(*args, **kwargs)
     return decorated
+
+# ==== JWT 관련 함수들 ====
+
+def create_jwt_for_admin():
+    """관리자 로그인 시 JWT 발급"""
+    now = datetime.utcnow()
+    payload = {
+        'sub': ADMIN_EMAIL,
+        'iat': now,
+        'exp': now + timedelta(hours=JWT_EXPIRES_HOURS),
+        'type': 'admin_token'
+    }
+    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return token
+
+def verify_jwt_token(token: str) -> bool:
+    """JWT 토큰 검증"""
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return payload.get('sub') == ADMIN_EMAIL and payload.get('type') == 'admin_token'
+    except jwt.ExpiredSignatureError:
+        app.logger.warning("JWT 토큰 만료")
+        return False
+    except jwt.InvalidTokenError as e:
+        app.logger.warning(f"JWT 토큰 오류: {e}")
+        return False
+    except Exception as e:
+        app.logger.error(f"JWT 검증 중 오류: {e}")
+        return False
 
 # ==== 수정된 번역 유틸리티 함수들 ====
 
@@ -519,29 +570,6 @@ def parse_iso_week(week_str: str):
     except Exception as e:
         raise ValueError(f"잘못된 week_str 형식: {week_str} ({e})")
 
-# ==== JWT 관련 함수들 ====
-
-def create_jwt_for_admin():
-    """관리자 로그인 시 JWT 발급"""
-    now = datetime.utcnow()
-    payload = {
-        'sub': ADMIN_EMAIL,
-        'iat': now,
-        'exp': now + timedelta(hours=JWT_EXPIRES_HOURS)
-    }
-    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-    return token
-
-def verify_jwt_token(token: str) -> bool:
-    """JWT 토큰 검증"""
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return payload.get('sub') == ADMIN_EMAIL
-    except jwt.ExpiredSignatureError:
-        return False
-    except Exception:
-        return False
-
 # ===================================================================
 # 다국어 처리 함수들
 # ===================================================================
@@ -589,6 +617,432 @@ def get_video_with_translation(group_id, lang_code='ko'):
         return None
 
 # ===================================================================
+# 백그라운드 자동 갱신 시스템
+# ===================================================================
+
+def refresh_expiring_urls():
+    """만료 임박한 presigned URL들을 일괄 갱신"""
+    try:
+        app.logger.info("🔄 백그라운드 URL 갱신 작업 시작...")
+        
+        uploads_ref = db.collection('uploads')
+        docs = uploads_ref.stream()
+        
+        updated_count = 0
+        total_count = 0
+        
+        for doc in docs:
+            total_count += 1
+            data = doc.to_dict()
+            
+            current_url = data.get('presigned_url', '')
+            video_key = data.get('video_key', '')
+            
+            if not video_key:
+                continue
+            
+            # 루트 문서 URL 갱신
+            if not current_url or is_presigned_url_expired(current_url, safety_margin_minutes=120):
+                try:
+                    new_presigned_url = generate_presigned_url(video_key, expires_in=604800)
+                    
+                    update_data = {
+                        'presigned_url': new_presigned_url,
+                        'auto_updated_at': datetime.utcnow().isoformat(),
+                        'auto_update_reason': 'background_refresh'
+                    }
+                    
+                    qr_key = data.get('qr_key', '')
+                    if qr_key:
+                        new_qr_url = generate_presigned_url(qr_key, expires_in=604800)
+                        update_data['qr_presigned_url'] = new_qr_url
+                    
+                    thumbnail_key = data.get('thumbnail_key', '')
+                    if thumbnail_key:
+                        new_thumbnail_url = generate_presigned_url(thumbnail_key, expires_in=604800)
+                        update_data['thumbnail_presigned_url'] = new_thumbnail_url
+                    
+                    doc.reference.update(update_data)
+                    updated_count += 1
+                    
+                except Exception as update_error:
+                    app.logger.error(f"URL 갱신 실패 {doc.id}: {update_error}")
+            
+            # 언어별 영상 URL도 갱신
+            try:
+                translations = doc.reference.collection('translations').stream()
+                for trans_doc in translations:
+                    trans_data = trans_doc.to_dict()
+                    if trans_data.get('video_key'):
+                        trans_url = trans_data.get('video_presigned_url', '')
+                        if not trans_url or is_presigned_url_expired(trans_url, safety_margin_minutes=120):
+                            new_trans_url = generate_presigned_url(trans_data['video_key'], expires_in=604800)
+                            trans_doc.reference.update({
+                                'video_presigned_url': new_trans_url,
+                                'url_updated_at': datetime.utcnow().isoformat()
+                            })
+                            updated_count += 1
+            except Exception as trans_error:
+                app.logger.error(f"번역 URL 갱신 실패 {doc.id}: {trans_error}")
+        
+        app.logger.info(f"🎉 백그라운드 URL 갱신 완료: {updated_count}/{total_count}")
+        
+    except Exception as e:
+        app.logger.error(f"❌ 백그라운드 URL 갱신 오류: {e}")
+
+# ===================================================================
+# 스케줄러 설정
+# ===================================================================
+
+scheduler = BackgroundScheduler(
+    timezone='UTC',
+    job_defaults={
+        'coalesce': True,
+        'max_instances': 1
+    }
+)
+
+def start_background_scheduler():
+    """백그라운드 스케줄러 시작"""
+    try:
+        scheduler.add_job(
+            func=refresh_expiring_urls,
+            trigger=IntervalTrigger(hours=6),  # 6시간으로 변경 (부하 감소)
+            id='refresh_video_urls',
+            name='동영상 URL 자동 갱신',
+            replace_existing=True
+        )
+        
+        scheduler.start()
+        app.logger.info("🚀 백그라운드 스케줄러 시작 (6시간 간격)")
+        atexit.register(lambda: scheduler.shutdown())
+        
+    except Exception as e:
+        app.logger.error(f"❌ 스케줄러 시작 실패: {e}")
+
+# ===================================================================
+# 🔧 수정된 로그인 관련 라우팅
+# ===================================================================
+
+@app.route('/', methods=['GET'])
+def login_page():
+    """로그인 페이지"""
+    # 이미 로그인된 사용자는 업로드 페이지로 리다이렉트
+    if session.get('logged_in') == True:
+        app.logger.info("이미 로그인된 사용자 - 업로드 페이지로 리다이렉트")
+        return redirect(url_for('upload_form'))
+    
+    return render_template('login.html')
+
+@app.route('/login', methods=['POST'])
+def login():
+    """관리자 로그인 - 세션 설정 강화"""
+    try:
+        pw = request.form.get('password', '')
+        email = request.form.get('email', ADMIN_EMAIL)  # 이메일이 없으면 기본값 사용
+
+        app.logger.info(f"로그인 시도: email={email}")
+
+        if email == ADMIN_EMAIL and pw == ADMIN_PASSWORD:
+            # 세션 설정 강화
+            session.permanent = True
+            session['logged_in'] = True
+            session['admin_email'] = email
+            session['login_time'] = datetime.utcnow().isoformat()
+            
+            app.logger.info(f"✅ 로그인 성공: {email}")
+            
+            # 응답에 추가 보안 설정
+            response = make_response(redirect(url_for('upload_form')))
+            
+            # Railway 환경에서 쿠키 설정 강화
+            if os.environ.get('RAILWAY_ENVIRONMENT'):
+                response.set_cookie(
+                    'session_verified', 
+                    'true', 
+                    max_age=timedelta(hours=4).total_seconds(),
+                    secure=True,
+                    httponly=True,
+                    samesite='Lax'
+                )
+            
+            return response
+        else:
+            app.logger.warning(f"❌ 로그인 실패: {email}")
+            return render_template('login.html', error="인증 실패")
+            
+    except Exception as e:
+        app.logger.error(f"로그인 오류: {e}")
+        return render_template('login.html', error="로그인 처리 중 오류 발생")
+
+@app.route('/api/admin/login', methods=['POST'])
+def api_admin_login():
+    """Flutter 관리자 로그인"""
+    try:
+        data = request.get_json() or {}
+        email = data.get('email', '').strip()
+        password = data.get('password', '')
+
+        app.logger.info(f"API 로그인 시도: {email}")
+
+        if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
+            token = create_jwt_for_admin()
+            
+            # 세션도 함께 설정 (혼용 가능하도록)
+            session.permanent = True
+            session['logged_in'] = True
+            session['admin_email'] = email
+            session['api_login_time'] = datetime.utcnow().isoformat()
+            
+            app.logger.info(f"✅ API 로그인 성공: {email}")
+            
+            return jsonify({
+                'token': token, 
+                'success': True,
+                'expires_in': JWT_EXPIRES_HOURS * 3600,
+                'user': {'email': email}
+            }), 200
+        else:
+            app.logger.warning(f"❌ API 로그인 실패: {email}")
+            return jsonify({'error': '관리자 인증 실패', 'success': False}), 401
+            
+    except Exception as e:
+        app.logger.error(f"API 로그인 오류: {e}")
+        return jsonify({'error': '로그인 처리 중 오류 발생', 'success': False}), 500
+
+@app.route('/logout', methods=['GET', 'POST'])
+def logout():
+    """로그아웃"""
+    session.clear()
+    app.logger.info("로그아웃 완료")
+    
+    response = make_response(redirect(url_for('login_page')))
+    
+    # Railway 환경에서 쿠키 삭제
+    if os.environ.get('RAILWAY_ENVIRONMENT'):
+        response.set_cookie('session_verified', '', expires=0)
+    
+    return response
+
+@app.route('/upload_form', methods=['GET'])
+@admin_required_flexible  # 🔧 수정된 데코레이터 사용
+def upload_form():
+    """업로드 폼 페이지"""
+    app.logger.info("업로드 폼 접근 - 인증 통과")
+    
+    main_cats = ['기계', '공구', '장비', '약품']
+    sub_map = {
+        '기계': ['공작기계', '제조기계', '산업기계'],
+        '공구': ['수공구', '전동공구', '절삭공구'],
+        '장비': ['안전장비', '운송장비', '작업장비'],
+        '약품': ['의약품', '화공약품'],
+    }
+    leaf_map = {
+        '공작기계': ['불도저', '크레인', '굴착기'],
+        '제조기계': ['사출 성형기', '프레스기', '열성형기'],
+        '산업기계': ['CNC 선반', '절삭기', '연삭기'],
+        '수공구': ['드릴', '해머', '플라이어'],
+        '전동공구': ['그라인더', '전동 드릴', '해머드릴'],
+        '절삭공구': ['커터', '플라즈마 노즐', '드릴 비트'],
+        '안전장비': ['헬멧', '방진 마스크', '낙하 방지벨트'],
+        '운송장비': ['리프트 장비', '체인 블록', '호이스트'],
+        '작업장비': ['스캐폴딩', '작업대', '리프트 테이블'],
+        '의약품': ['항생제', '인슐린', '항응고제'],
+        '화공약품': ['황산', '염산', '수산화나트륨']
+    }
+    return render_template('upload_form.html', mains=main_cats, subs=sub_map, leafs=leaf_map)
+
+# ===================================================================
+# 업로드 핸들러 (기존 코드 유지)
+# ===================================================================
+
+@app.route('/upload', methods=['POST'])
+@admin_required_flexible  # 🔧 수정된 데코레이터 사용
+def upload_video():
+    """최적화된 업로드 처리 - 번역을 백그라운드로 이동"""
+    app.logger.info("업로드 요청 - 인증 통과")
+
+    file = request.files.get('file')
+    thumbnail = request.files.get('thumbnail')
+    group_name = request.form.get('group_name', 'default')
+    main_cat = request.form.get('main_category', '')
+    sub_cat = request.form.get('sub_category', '')
+    leaf_cat = request.form.get('sub_sub_category', '')
+    lecture_level = request.form.get('level', '')
+    lecture_tag = request.form.get('tag', '')
+
+    if not file:
+        return "파일이 필요합니다.", 400
+
+    # 1) 즉시 번역 (한국어 + 영어만, 나머지는 백그라운드)
+    app.logger.info(f"즉시 번역 시작: '{group_name}'")
+    immediate_translations = {
+        'ko': group_name,
+        'en': translate_text_safe(group_name, 'en')
+    }
+
+    # 2) 그룹 ID 생성 및 S3 키 구성
+    group_id = uuid.uuid4().hex
+    date_str = datetime.now().strftime('%Y%m%d')
+    safe_name = re.sub(r'[^\w]', '_', group_name)
+    folder = f"videos/{group_id}_{safe_name}_{date_str}"
+    
+    ext = Path(file.filename).suffix.lower() or '.mp4'
+    video_key = f"{folder}/video{ext}"
+
+    # 3) 임시 저장 및 S3 업로드
+    tmp_path = Path(tempfile.gettempdir()) / f"{group_id}{ext}"
+    file.save(tmp_path)
+
+    # 4) 동영상 길이 계산
+    try:
+        with VideoFileClip(str(tmp_path)) as clip:
+            duration_sec = int(clip.duration)
+    except Exception as e:
+        duration_sec = 0
+        app.logger.warning(f"동영상 길이 계산 실패: {e}")
+
+    minutes = duration_sec // 60
+    seconds = duration_sec % 60
+    lecture_time = f"{minutes}:{seconds:02d}"
+
+    # S3 업로드
+    s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
+    tmp_path.unlink(missing_ok=True)
+
+    presigned_url = generate_presigned_url(video_key, expires_in=604800)
+
+    # 5) 썸네일 처리
+    thumbnail_key = None
+    thumbnail_presigned_url = None
+    if thumbnail and thumbnail.filename:
+        try:
+            thumb_ext = Path(thumbnail.filename).suffix.lower() or '.jpg'
+            thumbnail_key = f"{folder}/thumbnail{thumb_ext}"
+            
+            thumb_tmp_path = Path(tempfile.gettempdir()) / f"{group_id}_thumb{thumb_ext}"
+            thumbnail.save(thumb_tmp_path)
+            
+            s3.upload_file(str(thumb_tmp_path), BUCKET_NAME, thumbnail_key, Config=config)
+            thumb_tmp_path.unlink(missing_ok=True)
+            
+            thumbnail_presigned_url = generate_presigned_url(thumbnail_key, expires_in=604800)
+            
+        except Exception as e:
+            app.logger.error(f"썸네일 업로드 실패: {e}")
+
+    # 6) QR 코드 생성 (안전 모드)
+    qr_link = f"{APP_BASE_URL}{group_id}"
+    qr_filename = f"{uuid.uuid4().hex}.png"
+    local_qr = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
+    
+    display_title = group_name
+    if main_cat or sub_cat or leaf_cat:
+        categories = [cat for cat in [main_cat, sub_cat, leaf_cat] if cat]
+        if categories:
+            display_title = f"{group_name}\n({' > '.join(categories)})"
+    
+    create_qr_with_logo_safe(qr_link, local_qr, lecture_title=display_title)
+    
+    qr_key = f"{folder}/{qr_filename}"
+    s3.upload_file(local_qr, BUCKET_NAME, qr_key)
+    qr_presigned_url = generate_presigned_url(qr_key, expires_in=604800)
+    
+    try:
+        os.remove(local_qr)
+    except OSError:
+        pass
+
+    # 7) 루트 문서 저장
+    root_doc_data = {
+        'group_id': group_id,
+        'group_name': group_name,
+        'main_category': main_cat,
+        'sub_category': sub_cat,
+        'sub_sub_category': leaf_cat,
+        'time': lecture_time,
+        'level': lecture_level,
+        'tag': lecture_tag,
+        'video_key': video_key,
+        'presigned_url': presigned_url,
+        'qr_link': qr_link,
+        'qr_key': qr_key,
+        'qr_presigned_url': qr_presigned_url,
+        'upload_date': date_str,
+        'created_at': datetime.utcnow().isoformat(),
+        'updated_at': datetime.utcnow().isoformat(),
+        'translation_status': 'partial'  # 부분 번역 상태
+    }
+
+    if thumbnail_key:
+        root_doc_data['thumbnail_key'] = thumbnail_key
+        root_doc_data['thumbnail_presigned_url'] = thumbnail_presigned_url
+
+    root_doc_ref = db.collection('uploads').document(group_id)
+    root_doc_ref.set(root_doc_data)
+
+    # 8) 즉시 번역 저장 (한국어, 영어)
+    translations_ref = root_doc_ref.collection('translations')
+    
+    for lang_code in ['ko', 'en']:
+        translation_data = {
+            'title': immediate_translations[lang_code],
+            'main_category': main_cat if lang_code == 'ko' else translate_text_safe(main_cat, lang_code),
+            'sub_category': sub_cat if lang_code == 'ko' else translate_text_safe(sub_cat, lang_code),
+            'sub_sub_category': leaf_cat if lang_code == 'ko' else translate_text_safe(leaf_cat, lang_code),
+            'language_code': lang_code,
+            'language_name': SUPPORTED_LANGUAGES[lang_code],
+            'is_original': (lang_code == 'ko'),
+            'translated_at': datetime.utcnow().isoformat()
+        }
+        
+        translations_ref.document(lang_code).set(translation_data)
+
+    # 9) 나머지 언어 번역을 백그라운드로 스케줄링
+    def background_translate():
+        remaining_languages = [lang for lang in SUPPORTED_LANGUAGES.keys() if lang not in ['ko', 'en']]
+        
+        for lang_code in remaining_languages:
+            try:
+                translation_data = {
+                    'title': translate_text_safe(group_name, lang_code),
+                    'main_category': translate_text_safe(main_cat, lang_code),
+                    'sub_category': translate_text_safe(sub_cat, lang_code),
+                    'sub_sub_category': translate_text_safe(leaf_cat, lang_code),
+                    'language_code': lang_code,
+                    'language_name': SUPPORTED_LANGUAGES[lang_code],
+                    'is_original': False,
+                    'translated_at': datetime.utcnow().isoformat()
+                }
+                
+                translations_ref.document(lang_code).set(translation_data)
+                time.sleep(0.5)  # API 호출 간격
+                
+            except Exception as e:
+                app.logger.error(f"백그라운드 번역 실패 ({lang_code}): {e}")
+        
+        # 번역 완료 상태 업데이트
+        root_doc_ref.update({'translation_status': 'complete'})
+        app.logger.info(f"✅ 백그라운드 번역 완료: {group_id}")
+
+    # 백그라운드 스레드로 실행
+    threading.Thread(target=background_translate, daemon=True).start()
+
+    app.logger.info(f"✅ 업로드 완료 (즉시 응답): {group_id}")
+
+    return render_template(
+        'success.html',
+        group_id=group_id,
+        translations=immediate_translations,
+        time=lecture_time,
+        level=lecture_level,
+        tag=lecture_tag,
+        presigned_url=presigned_url,
+        qr_url=qr_presigned_url,
+        thumbnail_url=thumbnail_presigned_url
+    )
+
+# ===================================================================
 # 🆕 언어별 영상 업로드 API (관리자 인증 수정)
 # ===================================================================
 
@@ -615,10 +1069,6 @@ def upload_language_video():
         file.seek(0, 2)  # 파일 끝으로 이동
         file_size = file.tell()
         file.seek(0)  # 파일 처음으로 복원
-        
-        # 파일 크기 제한 제거 (Wasabi는 5TB까지 지원)
-        # if file_size > 1024 * 1024 * 1024:  # 1GB
-        #     return jsonify({'error': '파일 크기는 1GB를 초과할 수 없습니다'}), 400
         
         app.logger.info(f"🌐 언어별 영상 업로드 시작: {group_id} - {language_code} ({file_size/1024/1024:.1f}MB)")
         
@@ -916,367 +1366,8 @@ def confirm_upload_complete():
         return jsonify({'error': f'업로드 확인 중 오류: {str(e)}'}), 500
 
 # ===================================================================
-# 백그라운드 자동 갱신 시스템
+# 시청 페이지 (Flutter 호환)
 # ===================================================================
-
-def refresh_expiring_urls():
-    """만료 임박한 presigned URL들을 일괄 갱신"""
-    try:
-        app.logger.info("🔄 백그라운드 URL 갱신 작업 시작...")
-        
-        uploads_ref = db.collection('uploads')
-        docs = uploads_ref.stream()
-        
-        updated_count = 0
-        total_count = 0
-        
-        for doc in docs:
-            total_count += 1
-            data = doc.to_dict()
-            
-            current_url = data.get('presigned_url', '')
-            video_key = data.get('video_key', '')
-            
-            if not video_key:
-                continue
-            
-            # 루트 문서 URL 갱신
-            if not current_url or is_presigned_url_expired(current_url, safety_margin_minutes=120):
-                try:
-                    new_presigned_url = generate_presigned_url(video_key, expires_in=604800)
-                    
-                    update_data = {
-                        'presigned_url': new_presigned_url,
-                        'auto_updated_at': datetime.utcnow().isoformat(),
-                        'auto_update_reason': 'background_refresh'
-                    }
-                    
-                    qr_key = data.get('qr_key', '')
-                    if qr_key:
-                        new_qr_url = generate_presigned_url(qr_key, expires_in=604800)
-                        update_data['qr_presigned_url'] = new_qr_url
-                    
-                    thumbnail_key = data.get('thumbnail_key', '')
-                    if thumbnail_key:
-                        new_thumbnail_url = generate_presigned_url(thumbnail_key, expires_in=604800)
-                        update_data['thumbnail_presigned_url'] = new_thumbnail_url
-                    
-                    doc.reference.update(update_data)
-                    updated_count += 1
-                    
-                except Exception as update_error:
-                    app.logger.error(f"URL 갱신 실패 {doc.id}: {update_error}")
-            
-            # 언어별 영상 URL도 갱신
-            try:
-                translations = doc.reference.collection('translations').stream()
-                for trans_doc in translations:
-                    trans_data = trans_doc.to_dict()
-                    if trans_data.get('video_key'):
-                        trans_url = trans_data.get('video_presigned_url', '')
-                        if not trans_url or is_presigned_url_expired(trans_url, safety_margin_minutes=120):
-                            new_trans_url = generate_presigned_url(trans_data['video_key'], expires_in=604800)
-                            trans_doc.reference.update({
-                                'video_presigned_url': new_trans_url,
-                                'url_updated_at': datetime.utcnow().isoformat()
-                            })
-                            updated_count += 1
-            except Exception as trans_error:
-                app.logger.error(f"번역 URL 갱신 실패 {doc.id}: {trans_error}")
-        
-        app.logger.info(f"🎉 백그라운드 URL 갱신 완료: {updated_count}/{total_count}")
-        
-    except Exception as e:
-        app.logger.error(f"❌ 백그라운드 URL 갱신 오류: {e}")
-
-# ===================================================================
-# 스케줄러 설정
-# ===================================================================
-
-scheduler = BackgroundScheduler(
-    timezone='UTC',
-    job_defaults={
-        'coalesce': True,
-        'max_instances': 1
-    }
-)
-
-def start_background_scheduler():
-    """백그라운드 스케줄러 시작"""
-    try:
-        scheduler.add_job(
-            func=refresh_expiring_urls,
-            trigger=IntervalTrigger(hours=6),  # 6시간으로 변경 (부하 감소)
-            id='refresh_video_urls',
-            name='동영상 URL 자동 갱신',
-            replace_existing=True
-        )
-        
-        scheduler.start()
-        app.logger.info("🚀 백그라운드 스케줄러 시작 (6시간 간격)")
-        atexit.register(lambda: scheduler.shutdown())
-        
-    except Exception as e:
-        app.logger.error(f"❌ 스케줄러 시작 실패: {e}")
-
-# ===================================================================
-# 업로드 핸들러 (기존 코드 유지)
-# ===================================================================
-
-@app.route('/upload', methods=['POST'])
-def upload_video():
-    """최적화된 업로드 처리 - 번역을 백그라운드로 이동"""
-    if not session.get('logged_in'):
-        return redirect(url_for('login_page'))
-
-    file = request.files.get('file')
-    thumbnail = request.files.get('thumbnail')
-    group_name = request.form.get('group_name', 'default')
-    main_cat = request.form.get('main_category', '')
-    sub_cat = request.form.get('sub_category', '')
-    leaf_cat = request.form.get('sub_sub_category', '')
-    lecture_level = request.form.get('level', '')
-    lecture_tag = request.form.get('tag', '')
-
-    if not file:
-        return "파일이 필요합니다.", 400
-
-    # 1) 즉시 번역 (한국어 + 영어만, 나머지는 백그라운드)
-    app.logger.info(f"즉시 번역 시작: '{group_name}'")
-    immediate_translations = {
-        'ko': group_name,
-        'en': translate_text_safe(group_name, 'en')
-    }
-
-    # 2) 그룹 ID 생성 및 S3 키 구성
-    group_id = uuid.uuid4().hex
-    date_str = datetime.now().strftime('%Y%m%d')
-    safe_name = re.sub(r'[^\w]', '_', group_name)
-    folder = f"videos/{group_id}_{safe_name}_{date_str}"
-    
-    ext = Path(file.filename).suffix.lower() or '.mp4'
-    video_key = f"{folder}/video{ext}"
-
-    # 3) 임시 저장 및 S3 업로드
-    tmp_path = Path(tempfile.gettempdir()) / f"{group_id}{ext}"
-    file.save(tmp_path)
-
-    # 4) 동영상 길이 계산
-    try:
-        with VideoFileClip(str(tmp_path)) as clip:
-            duration_sec = int(clip.duration)
-    except Exception as e:
-        duration_sec = 0
-        app.logger.warning(f"동영상 길이 계산 실패: {e}")
-
-    minutes = duration_sec // 60
-    seconds = duration_sec % 60
-    lecture_time = f"{minutes}:{seconds:02d}"
-
-    # S3 업로드
-    s3.upload_file(str(tmp_path), BUCKET_NAME, video_key, Config=config)
-    tmp_path.unlink(missing_ok=True)
-
-    presigned_url = generate_presigned_url(video_key, expires_in=604800)
-
-    # 5) 썸네일 처리
-    thumbnail_key = None
-    thumbnail_presigned_url = None
-    if thumbnail and thumbnail.filename:
-        try:
-            thumb_ext = Path(thumbnail.filename).suffix.lower() or '.jpg'
-            thumbnail_key = f"{folder}/thumbnail{thumb_ext}"
-            
-            thumb_tmp_path = Path(tempfile.gettempdir()) / f"{group_id}_thumb{thumb_ext}"
-            thumbnail.save(thumb_tmp_path)
-            
-            s3.upload_file(str(thumb_tmp_path), BUCKET_NAME, thumbnail_key, Config=config)
-            thumb_tmp_path.unlink(missing_ok=True)
-            
-            thumbnail_presigned_url = generate_presigned_url(thumbnail_key, expires_in=604800)
-            
-        except Exception as e:
-            app.logger.error(f"썸네일 업로드 실패: {e}")
-
-    # 6) QR 코드 생성 (안전 모드)
-    qr_link = f"{APP_BASE_URL}{group_id}"
-    qr_filename = f"{uuid.uuid4().hex}.png"
-    local_qr = os.path.join(app.config['UPLOAD_FOLDER'], qr_filename)
-    
-    display_title = group_name
-    if main_cat or sub_cat or leaf_cat:
-        categories = [cat for cat in [main_cat, sub_cat, leaf_cat] if cat]
-        if categories:
-            display_title = f"{group_name}\n({' > '.join(categories)})"
-    
-    create_qr_with_logo_safe(qr_link, local_qr, lecture_title=display_title)
-    
-    qr_key = f"{folder}/{qr_filename}"
-    s3.upload_file(local_qr, BUCKET_NAME, qr_key)
-    qr_presigned_url = generate_presigned_url(qr_key, expires_in=604800)
-    
-    try:
-        os.remove(local_qr)
-    except OSError:
-        pass
-
-    # 7) 루트 문서 저장
-    root_doc_data = {
-        'group_id': group_id,
-        'group_name': group_name,
-        'main_category': main_cat,
-        'sub_category': sub_cat,
-        'sub_sub_category': leaf_cat,
-        'time': lecture_time,
-        'level': lecture_level,
-        'tag': lecture_tag,
-        'video_key': video_key,
-        'presigned_url': presigned_url,
-        'qr_link': qr_link,
-        'qr_key': qr_key,
-        'qr_presigned_url': qr_presigned_url,
-        'upload_date': date_str,
-        'created_at': datetime.utcnow().isoformat(),
-        'updated_at': datetime.utcnow().isoformat(),
-        'translation_status': 'partial'  # 부분 번역 상태
-    }
-
-    if thumbnail_key:
-        root_doc_data['thumbnail_key'] = thumbnail_key
-        root_doc_data['thumbnail_presigned_url'] = thumbnail_presigned_url
-
-    root_doc_ref = db.collection('uploads').document(group_id)
-    root_doc_ref.set(root_doc_data)
-
-    # 8) 즉시 번역 저장 (한국어, 영어)
-    translations_ref = root_doc_ref.collection('translations')
-    
-    for lang_code in ['ko', 'en']:
-        translation_data = {
-            'title': immediate_translations[lang_code],
-            'main_category': main_cat if lang_code == 'ko' else translate_text_safe(main_cat, lang_code),
-            'sub_category': sub_cat if lang_code == 'ko' else translate_text_safe(sub_cat, lang_code),
-            'sub_sub_category': leaf_cat if lang_code == 'ko' else translate_text_safe(leaf_cat, lang_code),
-            'language_code': lang_code,
-            'language_name': SUPPORTED_LANGUAGES[lang_code],
-            'is_original': (lang_code == 'ko'),
-            'translated_at': datetime.utcnow().isoformat()
-        }
-        
-        translations_ref.document(lang_code).set(translation_data)
-
-    # 9) 나머지 언어 번역을 백그라운드로 스케줄링
-    def background_translate():
-        remaining_languages = [lang for lang in SUPPORTED_LANGUAGES.keys() if lang not in ['ko', 'en']]
-        
-        for lang_code in remaining_languages:
-            try:
-                translation_data = {
-                    'title': translate_text_safe(group_name, lang_code),
-                    'main_category': translate_text_safe(main_cat, lang_code),
-                    'sub_category': translate_text_safe(sub_cat, lang_code),
-                    'sub_sub_category': translate_text_safe(leaf_cat, lang_code),
-                    'language_code': lang_code,
-                    'language_name': SUPPORTED_LANGUAGES[lang_code],
-                    'is_original': False,
-                    'translated_at': datetime.utcnow().isoformat()
-                }
-                
-                translations_ref.document(lang_code).set(translation_data)
-                time.sleep(0.5)  # API 호출 간격
-                
-            except Exception as e:
-                app.logger.error(f"백그라운드 번역 실패 ({lang_code}): {e}")
-        
-        # 번역 완료 상태 업데이트
-        root_doc_ref.update({'translation_status': 'complete'})
-        app.logger.info(f"✅ 백그라운드 번역 완료: {group_id}")
-
-    # 백그라운드 스레드로 실행
-    threading.Thread(target=background_translate, daemon=True).start()
-
-    app.logger.info(f"✅ 업로드 완료 (즉시 응답): {group_id}")
-
-    return render_template(
-        'success.html',
-        group_id=group_id,
-        translations=immediate_translations,
-        time=lecture_time,
-        level=lecture_level,
-        tag=lecture_tag,
-        presigned_url=presigned_url,
-        qr_url=qr_presigned_url,
-        thumbnail_url=thumbnail_presigned_url
-    )
-
-# ===================================================================
-# 나머지 라우팅 및 API 엔드포인트들
-# ===================================================================
-
-@app.route('/', methods=['GET'])
-def login_page():
-    """로그인 페이지"""
-    return render_template('login.html')
-
-@app.route('/login', methods=['POST'])
-def login():
-    """관리자 로그인"""
-    try:
-        pw = request.form.get('password', '')
-        email = request.form.get('email', '')
-
-        if email == ADMIN_EMAIL and pw == ADMIN_PASSWORD:
-            session['logged_in'] = True
-            return redirect(url_for('upload_form'))
-        return render_template('login.html', error="인증 실패")
-    except Exception as e:
-        app.logger.error(f"로그인 오류: {e}")
-        return render_template('login.html', error="로그인 처리 중 오류 발생")
-
-@app.route('/api/admin/login', methods=['POST'])
-def api_admin_login():
-    """Flutter 관리자 로그인"""
-    try:
-        data = request.get_json() or {}
-        email = data.get('email', '').strip()
-        password = data.get('password', '')
-
-        if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
-            token = create_jwt_for_admin()
-            return jsonify({'token': token, 'success': True}), 200
-        else:
-            return jsonify({'error': '관리자 인증 실패', 'success': False}), 401
-    except Exception as e:
-        app.logger.error(f"API 로그인 오류: {e}")
-        return jsonify({'error': '로그인 처리 중 오류 발생', 'success': False}), 500
-
-@app.route('/upload_form', methods=['GET'])
-def upload_form():
-    """업로드 폼 페이지"""
-    if not session.get('logged_in'):
-        return redirect(url_for('login_page'))
-
-    main_cats = ['기계', '공구', '장비', '약품']
-    sub_map = {
-        '기계': ['공작기계', '제조기계', '산업기계'],
-        '공구': ['수공구', '전동공구', '절삭공구'],
-        '장비': ['안전장비', '운송장비', '작업장비'],
-        '약품': ['의약품', '화공약품'],
-    }
-    leaf_map = {
-        '공작기계': ['불도저', '크레인', '굴착기'],
-        '제조기계': ['사출 성형기', '프레스기', '열성형기'],
-        '산업기계': ['CNC 선반', '절삭기', '연삭기'],
-        '수공구': ['드릴', '해머', '플라이어'],
-        '전동공구': ['그라인더', '전동 드릴', '해머드릴'],
-        '절삭공구': ['커터', '플라즈마 노즐', '드릴 비트'],
-        '안전장비': ['헬멧', '방진 마스크', '낙하 방지벨트'],
-        '운송장비': ['리프트 장비', '체인 블록', '호이스트'],
-        '작업장비': ['스캐폴딩', '작업대', '리프트 테이블'],
-        '의약품': ['항생제', '인슐린', '항응고제'],
-        '화공약품': ['황산', '염산', '수산화나트륨']
-    }
-    return render_template('upload_form.html', mains=main_cats, subs=sub_map, leafs=leaf_map)
 
 @app.route('/watch/<group_id>', methods=['GET'])
 def watch(group_id):
@@ -1498,21 +1589,37 @@ def delete_language_video():
             'error': f'삭제 중 오류가 발생했습니다: {str(e)}'
         }), 500
 
+# ==== 🔧 세션 상태 확인 API 추가 ====
+
 @app.route('/api/admin/check_auth', methods=['GET'])
 def check_admin_auth():
-    """관리자 인증 상태 확인"""
+    """관리자 인증 상태 확인 - 디버깅용"""
     session_auth = session.get('logged_in', False)
+    session_email = session.get('admin_email', '')
     
     auth_header = request.headers.get('Authorization', '')
     token_auth = False
+    token_email = ''
+    
     if auth_header.startswith('Bearer '):
         token = auth_header.split(' ', 1)[1]
-        token_auth = verify_jwt_token(token)
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            token_auth = payload.get('sub') == ADMIN_EMAIL
+            token_email = payload.get('sub', '')
+        except:
+            token_auth = False
+    
+    app.logger.info(f"인증 상태 확인 - 세션: {session_auth}, 토큰: {token_auth}")
     
     return jsonify({
         'authenticated': session_auth or token_auth,
         'session_auth': session_auth,
+        'session_email': session_email,
         'token_auth': token_auth,
+        'token_email': token_email,
+        'railway_env': bool(os.environ.get('RAILWAY_ENVIRONMENT')),
+        'session_data': dict(session),
         'message': '인증됨' if (session_auth or token_auth) else '인증 필요'
     })
 
@@ -1880,6 +1987,15 @@ def health_check():
                 'scheduler': scheduler.running if 'scheduler' in globals() else False,
                 'translator': get_translator() is not None
             },
+            'auth_status': {
+                'session_support': True,
+                'jwt_support': True,
+                'current_session': bool(session.get('logged_in'))
+            },
+            'environment': {
+                'railway': bool(os.environ.get('RAILWAY_ENVIRONMENT')),
+                'https': request.is_secure
+            },
             'supported_languages': SUPPORTED_LANGUAGES,
             'language_count': len(SUPPORTED_LANGUAGES),
             'features': {
@@ -1888,7 +2004,7 @@ def health_check():
                 'direct_upload_support': True,
                 'flutter_compatibility': True
             },
-            'version': '2.5.0-complete'
+            'version': '2.5.1-auth-fixed'
         }), 200 if overall_status == 'healthy' else 503
         
     except Exception as e:
@@ -1933,6 +2049,7 @@ def initialize_railway_environment():
             app.logger.setLevel(logging.INFO)
         
         app.logger.info("🚂 Railway 환경 초기화 완료")
+        app.logger.info(f"🔐 HTTPS 모드: {bool(os.environ.get('RAILWAY_ENVIRONMENT'))}")
         return True
         
     except Exception as e:
@@ -1949,10 +2066,11 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     
     app.logger.info(f"🚀 Flask 서버 시작")
+    app.logger.info(f"🔐 인증 시스템: 세션 + JWT 이중 지원")
+    app.logger.info(f"🌐 Railway 환경: {bool(os.environ.get('RAILWAY_ENVIRONMENT'))}")
     app.logger.info(f"📱 지원 언어: {', '.join(SUPPORTED_LANGUAGES.values())}")
     app.logger.info(f"🌐 언어별 영상 업로드 지원")
     app.logger.info(f"💾 직접 업로드 지원 (서버 메모리 우회)")
-    app.logger.info(f"🔒 관리자 인증 개선: 세션 + JWT 동시 지원")
     
     if os.environ.get('RAILWAY_ENVIRONMENT'):
         app.run(host="0.0.0.0", port=port, debug=False)
